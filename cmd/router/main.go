@@ -58,7 +58,7 @@ func main() {
 		} else {
 			fmt.Println("🎉 Successfully connected to GitHub Copilot!")
 		}
-		fmt.Println("Credentials saved to ~/.config/github-copilot/hosts.json")
+		fmt.Printf("Credentials saved to %s\n", copilot.GetTokenFilePath())
 		fmt.Println("==================================================")
 		return
 	}

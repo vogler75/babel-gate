@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -151,8 +152,8 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		_ = os.WriteFile("/tmp/last_google_stream_error_payload.json", bodyBytes, 0644)
-		_ = os.WriteFile("/tmp/last_google_stream_error_response.json", body, 0644)
+		_ = os.WriteFile(filepath.Join(os.TempDir(), "last_google_stream_error_payload.json"), bodyBytes, 0644)
+		_ = os.WriteFile(filepath.Join(os.TempDir(), "last_google_stream_error_response.json"), body, 0644)
 		log.Printf("[GOOGLE STREAM ERROR] status %d: %s\nTarget URL: %s\nPayload was: %s", resp.StatusCode, string(body), url, string(bodyBytes))
 		return nil, fmt.Errorf("google gemini stream api error %d: %s", resp.StatusCode, string(body))
 	}

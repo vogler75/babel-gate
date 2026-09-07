@@ -210,21 +210,24 @@ func GetAuthenticatedUser(ctx context.Context, client *http.Client, token string
 	return userObj.Login, nil
 }
 
-// SaveTokenToDisk saves the token to ~/.config/github-copilot/hosts.json.
-func SaveTokenToDisk(token, username string) error {
+// GetTokenFilePath returns the default path where Copilot tokens are saved.
+func GetTokenFilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("get user home directory: %w", err)
+		return filepath.Join(".config", "github-copilot", "hosts.json")
 	}
+	return filepath.Join(home, ".config", "github-copilot", "hosts.json")
+}
 
-	configDir := filepath.Join(home, ".config", "github-copilot")
+// SaveTokenToDisk saves the token to ~/.config/github-copilot/hosts.json.
+func SaveTokenToDisk(token, username string) error {
+	hostsPath := GetTokenFilePath()
+	configDir := filepath.Dir(hostsPath)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("create config dir %s: %w", configDir, err)
 	}
 
-	hostsPath := filepath.Join(configDir, "hosts.json")
 	hostsData := make(map[string]map[string]string)
-
 	if data, err := os.ReadFile(hostsPath); err == nil {
 		_ = json.Unmarshal(data, &hostsData)
 	}
@@ -248,12 +251,72 @@ func SaveTokenToDisk(token, username string) error {
 	return nil
 }
 
+func findTokenInJSONApps(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var apps map[string]struct {
+		OAuthToken string `json:"oauth_token"`
+	}
+	if err := json.Unmarshal(data, &apps); err == nil {
+		for _, app := range apps {
+			if app.OAuthToken != "" {
+				return app.OAuthToken
+			}
+		}
+	}
+	return ""
+}
+
+func findTokenInJSONHosts(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var hosts map[string]struct {
+		OAuthToken string `json:"oauth_token"`
+	}
+	if err := json.Unmarshal(data, &hosts); err == nil {
+		if h, ok := hosts["github.com"]; ok && h.OAuthToken != "" {
+			return h.OAuthToken
+		}
+		for _, h := range hosts {
+			if h.OAuthToken != "" {
+				return h.OAuthToken
+			}
+		}
+	}
+	return ""
+}
+
+func findTokenInYAMLHosts(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var ghHosts map[string]struct {
+		OAuthToken string `yaml:"oauth_token"`
+	}
+	if err := yaml.Unmarshal(data, &ghHosts); err == nil {
+		if h, ok := ghHosts["github.com"]; ok && h.OAuthToken != "" {
+			return h.OAuthToken
+		}
+		for _, h := range ghHosts {
+			if h.OAuthToken != "" {
+				return h.OAuthToken
+			}
+		}
+	}
+	return ""
+}
+
 // ResolveGitHubToken attempts to locate a GitHub / Copilot token from multiple sources:
 // 1. Explicit token argument
 // 2. COPILOT_API_KEY, GITHUB_TOKEN, GH_TOKEN env vars
-// 3. ~/.config/github-copilot/apps.json
-// 4. ~/.config/github-copilot/hosts.json
-// 5. ~/.config/gh/hosts.yml
+// 3. github-copilot apps.json (~/.config, %LOCALAPPDATA%, %APPDATA%)
+// 4. github-copilot hosts.json (~/.config, %LOCALAPPDATA%, %APPDATA%)
+// 5. GitHub CLI hosts.yml (GH_CONFIG_DIR, %APPDATA%/GitHub CLI, %LOCALAPPDATA%/GitHub CLI, ~/.config/gh)
 func ResolveGitHubToken(explicitToken string) string {
 	if explicitToken != "" && !strings.HasPrefix(explicitToken, "${") {
 		return explicitToken
@@ -265,59 +328,65 @@ func ResolveGitHubToken(explicitToken string) string {
 		}
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
+	home, _ := os.UserHomeDir()
+	appData := os.Getenv("APPDATA")
+	localAppData := os.Getenv("LOCALAPPDATA")
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 
-	// 1. ~/.config/github-copilot/apps.json
-	appsPath := filepath.Join(home, ".config", "github-copilot", "apps.json")
-	if data, err := os.ReadFile(appsPath); err == nil {
-		var apps map[string]struct {
-			OAuthToken string `json:"oauth_token"`
-		}
-		if err := json.Unmarshal(data, &apps); err == nil {
-			for _, app := range apps {
-				if app.OAuthToken != "" {
-					return app.OAuthToken
-				}
-			}
-		}
+	// 1. Check github-copilot apps.json
+	var appsPaths []string
+	if home != "" {
+		appsPaths = append(appsPaths, filepath.Join(home, ".config", "github-copilot", "apps.json"))
 	}
-
-	// 2. ~/.config/github-copilot/hosts.json
-	copilotHostsPath := filepath.Join(home, ".config", "github-copilot", "hosts.json")
-	if data, err := os.ReadFile(copilotHostsPath); err == nil {
-		var hosts map[string]struct {
-			OAuthToken string `json:"oauth_token"`
-		}
-		if err := json.Unmarshal(data, &hosts); err == nil {
-			if h, ok := hosts["github.com"]; ok && h.OAuthToken != "" {
-				return h.OAuthToken
-			}
-			for _, h := range hosts {
-				if h.OAuthToken != "" {
-					return h.OAuthToken
-				}
-			}
+	if localAppData != "" {
+		appsPaths = append(appsPaths, filepath.Join(localAppData, "github-copilot", "apps.json"))
+	}
+	if appData != "" {
+		appsPaths = append(appsPaths, filepath.Join(appData, "github-copilot", "apps.json"))
+	}
+	for _, p := range appsPaths {
+		if token := findTokenInJSONApps(p); token != "" {
+			return token
 		}
 	}
 
-	// 3. ~/.config/gh/hosts.yml
-	ghHostsPath := filepath.Join(home, ".config", "gh", "hosts.yml")
-	if data, err := os.ReadFile(ghHostsPath); err == nil {
-		var ghHosts map[string]struct {
-			OAuthToken string `yaml:"oauth_token"`
+	// 2. Check github-copilot hosts.json
+	var hostsPaths []string
+	if home != "" {
+		hostsPaths = append(hostsPaths, filepath.Join(home, ".config", "github-copilot", "hosts.json"))
+	}
+	if localAppData != "" {
+		hostsPaths = append(hostsPaths, filepath.Join(localAppData, "github-copilot", "hosts.json"))
+	}
+	if appData != "" {
+		hostsPaths = append(hostsPaths, filepath.Join(appData, "github-copilot", "hosts.json"))
+	}
+	for _, p := range hostsPaths {
+		if token := findTokenInJSONHosts(p); token != "" {
+			return token
 		}
-		if err := yaml.Unmarshal(data, &ghHosts); err == nil {
-			if h, ok := ghHosts["github.com"]; ok && h.OAuthToken != "" {
-				return h.OAuthToken
-			}
-			for _, h := range ghHosts {
-				if h.OAuthToken != "" {
-					return h.OAuthToken
-				}
-			}
+	}
+
+	// 3. Check GitHub CLI hosts.yml
+	var ghPaths []string
+	if ghConfig := os.Getenv("GH_CONFIG_DIR"); ghConfig != "" {
+		ghPaths = append(ghPaths, filepath.Join(ghConfig, "hosts.yml"))
+	}
+	if appData != "" {
+		ghPaths = append(ghPaths, filepath.Join(appData, "GitHub CLI", "hosts.yml"))
+	}
+	if localAppData != "" {
+		ghPaths = append(ghPaths, filepath.Join(localAppData, "GitHub CLI", "hosts.yml"))
+	}
+	if xdgConfig != "" {
+		ghPaths = append(ghPaths, filepath.Join(xdgConfig, "gh", "hosts.yml"))
+	}
+	if home != "" {
+		ghPaths = append(ghPaths, filepath.Join(home, ".config", "gh", "hosts.yml"))
+	}
+	for _, p := range ghPaths {
+		if token := findTokenInYAMLHosts(p); token != "" {
+			return token
 		}
 	}
 

@@ -120,24 +120,42 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
 
 ### 1. Build from Source
 
+**macOS / Linux:**
 ```bash
 git clone https://github.com/vogler75/babel-gate.git
 cd babel-gate
 make build
 ```
 
-This generates the standalone binary in `./bin/babelgate` (with `./bin/llm-router` symlinked for convenience).
+**Windows (PowerShell / Command Prompt):**
+```powershell
+git clone https://github.com/vogler75/babel-gate.git
+cd babel-gate
+go build -o bin\babelgate.exe .\cmd\router
+```
+
+This generates the standalone binary in `./bin/babelgate` (`bin\babelgate.exe` on Windows, with `./bin/llm-router` symlinked on Unix).
 
 ### 2. Run with Zero-Config
 
 `babelgate` automatically detects API keys from your environment variables:
 
+**macOS / Linux:**
 ```bash
 export GEMINI_API_KEY="AIzaSy..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 
 ./bin/babelgate
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:GEMINI_API_KEY="AIzaSy..."
+$env:ANTHROPIC_API_KEY="sk-ant-..."
+$env:OPENAI_API_KEY="sk-..."
+
+.\bin\babelgate.exe
 ```
 
 > [!TIP]

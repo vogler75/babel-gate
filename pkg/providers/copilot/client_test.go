@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -250,4 +252,56 @@ func TestResolveGitHubToken(t *testing.T) {
 	if token != "env-copilot-token" {
 		t.Fatalf("expected env-copilot-token, got %s", token)
 	}
+
+	// Windows APPDATA GitHub CLI hosts.yml discovery
+	t.Run("Windows APPDATA GitHub CLI", func(t *testing.T) {
+		tempDir := t.TempDir()
+		ghDir := filepath.Join(tempDir, "GitHub CLI")
+		if err := os.MkdirAll(ghDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		hostsYAML := "github.com:\n    oauth_token: gho_windows_appdata_test_12345\n    user: testuser\n"
+		if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), []byte(hostsYAML), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("HOME", tempDir)
+		t.Setenv("USERPROFILE", tempDir)
+		t.Setenv("APPDATA", tempDir)
+		t.Setenv("COPILOT_API_KEY", "")
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("GH_TOKEN", "")
+		t.Setenv("GH_CONFIG_DIR", "")
+
+		tok := ResolveGitHubToken("")
+		if tok != "gho_windows_appdata_test_12345" {
+			t.Fatalf("expected token from Windows APPDATA GitHub CLI, got: %s", tok)
+		}
+	})
+
+	// Windows LOCALAPPDATA Copilot hosts.json discovery
+	t.Run("Windows LOCALAPPDATA Copilot", func(t *testing.T) {
+		tempDir := t.TempDir()
+		copilotDir := filepath.Join(tempDir, "github-copilot")
+		if err := os.MkdirAll(copilotDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		hostsJSON := `{"github.com": {"oauth_token": "ghu_windows_localappdata_copilot_987", "user": "winuser"}}`
+		if err := os.WriteFile(filepath.Join(copilotDir, "hosts.json"), []byte(hostsJSON), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("HOME", tempDir)
+		t.Setenv("USERPROFILE", tempDir)
+		t.Setenv("LOCALAPPDATA", tempDir)
+		t.Setenv("APPDATA", "")
+		t.Setenv("COPILOT_API_KEY", "")
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("GH_TOKEN", "")
+
+		tok := ResolveGitHubToken("")
+		if tok != "ghu_windows_localappdata_copilot_987" {
+			t.Fatalf("expected token from Windows LOCALAPPDATA Copilot, got: %s", tok)
+		}
+	})
 }
