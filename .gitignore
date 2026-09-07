@@ -1,0 +1,18 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment variables & secrets
+.env
+*.env.local
+config.yaml
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

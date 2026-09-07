@@ -1,0 +1,53 @@
+# BabelGate Configuration Example
+
+server:
+  port: 8080
+  # Optional: require an API key from incoming clients (Bearer token or x-api-key)
+  # api_key: "router-secret-key"
+  timeout_seconds: 120
+  cors_origins:
+    - "*"
+
+# Upstream LLM Providers
+# API keys support environment variable interpolation like ${ENV_VAR} or $ENV_VAR.
+# If config.yaml is omitted, providers are automatically initialized from:
+# - GEMINI_API_KEY / GOOGLE_API_KEY
+# - ANTHROPIC_API_KEY
+# - OPENAI_API_KEY
+providers:
+  google:
+    type: google
+    api_key: "${GEMINI_API_KEY}"
+    # Optional: custom base URL
+    # base_url: "https://generativelanguage.googleapis.com/v1beta"
+    # Optional: list explicit models to expose
+    # enabled_models:
+    #   - gemini-2.5-pro
+    #   - gemini-2.5-flash
+
+  anthropic:
+    type: anthropic
+    api_key: "${ANTHROPIC_API_KEY}"
+    # base_url: "https://api.anthropic.com/v1"
+
+  openai:
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
+    # base_url: "https://api.openai.com/v1"
+
+  # GitHub Copilot (uses device login, local ~/.config/github-copilot, or GITHUB_TOKEN)
+  copilot:
+    type: copilot
+    # api_key is optional if authenticated via:
+    # 1. Device login: ./bin/llm-router -copilot-login
+    # 2. Existing VS Code / JetBrains login in ~/.config/github-copilot/apps.json
+    # 3. GITHUB_TOKEN or COPILOT_API_KEY env var
+    # api_key: "${GITHUB_TOKEN}"
+
+# Optional: model aliases if you want custom shortcuts
+# routing:
+#   routes:
+#     "fast": "google/gemini-2.5-flash"
+#     "smart": "copilot/gpt-4o"
+#     "claude-3-7-sonnet": "copilot/gpt-4o"
+
