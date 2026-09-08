@@ -358,10 +358,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
     <!-- Active Providers -->
     <div class="card" style="margin-bottom: 1.75rem;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
-        <h2 style="margin-bottom: 0;">Connected Upstream Providers <span class="badge" id="provCount">0</span></h2>
-        <a href="/setup" class="btn-sm" style="text-decoration: none; color: #58a6ff; display: inline-flex; align-items: center; gap: 0.35rem;">📖 Setup &amp; Client Instructions &rarr;</a>
-      </div>
+      <h2 style="margin-bottom: 0.75rem;">Connected Upstream Providers <span class="badge" id="provCount">0</span></h2>
       <div style="overflow-x: auto;">
         <table>
           <thead>
@@ -963,6 +960,26 @@ const setupHTML = `<!DOCTYPE html>
         <span class="badge">Native Messages API</span>
       </div>
       <p>Claude Code uses the Anthropic Messages API. BabelGate serves Anthropic requests directly on <code>/v1/messages</code> and translates them to any configured upstream provider (OpenAI, Anthropic, Gemini, Azure, etc.).</p>
+
+      <div class="step-title">Configuration in <code>.claude/settings.json</code>:</div>
+      <p>The following environment settings are needed in your project's <code>.claude/settings.json</code> (or global <code>~/.claude/settings.json</code>):</p>
+      <div class="code-box">
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        <pre><code class="lang-json">{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_USE_BEDROCK": "0",
+    "DISABLE_PROMPT_CACHING": "0",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0",
+    "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE": "200000",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+    "CLAUDE_CODE_EFFORT_LEVEL": "medium",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}</code></pre>
+      </div>
 
       <div class="step-title">Quick Launch (Current Terminal Session):</div>
       <div class="code-box">

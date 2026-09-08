@@ -203,6 +203,24 @@ Route Claude Code to Google's high-context Gemini models:
    claude
    ```
 
+   Alternatively, configure the required environment settings in your `.claude/settings.json` (or `~/.claude/settings.json`):
+   ```json
+   {
+     "env": {
+       "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+       "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+       "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+       "CLAUDE_CODE_USE_BEDROCK": "0",
+       "DISABLE_PROMPT_CACHING": "0",
+       "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0",
+       "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE": "200000",
+       "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
+       "CLAUDE_CODE_EFFORT_LEVEL": "medium",
+       "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+     }
+   }
+   ```
+
 Claude Code executes its full agentic loop (terminal execution, file viewing, codebase search) through Gemini 2.5 Pro!
 
 ---
