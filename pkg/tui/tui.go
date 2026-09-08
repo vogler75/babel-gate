@@ -8,10 +8,9 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 
 	"github.com/vogler75/babel-gate/pkg/logger"
 	"github.com/vogler75/babel-gate/pkg/router"
@@ -41,8 +40,7 @@ const (
 
 // IsTerminal returns true if stdout is connected to a terminal.
 func IsTerminal() bool {
-	_, err := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TIOCGETA)
-	return err == nil
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // TUI represents the interactive terminal GUI.
@@ -55,7 +53,7 @@ type TUI struct {
 	scrollPos  int // 0 means bottom (auto-scroll), >0 means scrolled up by N lines
 	autoScroll bool
 	stopChan   chan struct{}
-	origTerm   *unix.Termios
+	origTerm   *term.State
 	cols       int
 	rows       int
 }
@@ -76,18 +74,10 @@ func New(srv *server.Server, engine *router.Engine, ring *logger.RingBuffer) *TU
 func (t *TUI) Run(ctx context.Context) error {
 	fd := int(os.Stdin.Fd())
 
-	// Save original termios
-	orig, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	// Save original termios and set raw mode
+	orig, err := term.MakeRaw(fd)
 	if err == nil {
 		t.origTerm = orig
-		raw := *orig
-		raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
-		raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-		raw.Cflag &^= unix.CSIZE | unix.PARENB
-		raw.Cflag |= unix.CS8
-		raw.Cc[unix.VMIN] = 1
-		raw.Cc[unix.VTIME] = 0
-		_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, &raw)
 	}
 
 	// Enter alternate screen and hide cursor
@@ -96,7 +86,7 @@ func (t *TUI) Run(ctx context.Context) error {
 
 	// Handle window resize signals (SIGWINCH)
 	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
+	notifyWinch(winch)
 	defer signal.Stop(winch)
 
 	t.updateSize()
@@ -134,16 +124,16 @@ func (t *TUI) Run(ctx context.Context) error {
 
 func (t *TUI) restoreTerminal() {
 	if t.origTerm != nil {
-		_ = unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TIOCSETA, t.origTerm)
+		_ = term.Restore(int(os.Stdin.Fd()), t.origTerm)
 	}
 	os.Stdout.WriteString(escShowCursor + escExitAlt)
 }
 
 func (t *TUI) updateSize() {
-	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
-	if err == nil && ws.Col > 0 && ws.Row > 0 {
-		t.cols = int(ws.Col)
-		t.rows = int(ws.Row)
+	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
+	if err == nil && cols > 0 && rows > 0 {
+		t.cols = cols
+		t.rows = rows
 	} else {
 		t.cols = 80
 		t.rows = 24

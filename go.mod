@@ -3,6 +3,7 @@ module github.com/vogler75/babel-gate
 go 1.25.0
 
 require (
+	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.58.0
 )
