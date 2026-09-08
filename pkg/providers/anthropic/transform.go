@@ -58,8 +58,9 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 
 			case canonical.PartThinking:
 				blocks = append(blocks, ContentBlock{
-					Type:     "thinking",
-					Thinking: p.Thinking,
+					Type:      "thinking",
+					Thinking:  p.Thinking,
+					Signature: p.ThoughtSignature,
 				})
 
 			case canonical.PartImage:
@@ -224,6 +225,12 @@ func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) 
 					Index:    event.Index,
 					Thinking: event.Delta.Thinking,
 				})
+			case "signature_delta":
+				out = append(out, canonical.CanonicalEvent{
+					Type:             canonical.EventThinkingDelta,
+					Index:            event.Index,
+					ThoughtSignature: event.Delta.Signature,
+				})
 			case "input_json_delta":
 				out = append(out, canonical.CanonicalEvent{
 					Type:         canonical.EventToolCallDelta,
@@ -353,9 +360,19 @@ func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, err
 						parts = append(parts, canonical.ContentPart{Type: canonical.PartText, Text: txt})
 					}
 				case "thinking":
-					if th, ok := blockMap["thinking"].(string); ok {
-						parts = append(parts, canonical.ContentPart{Type: canonical.PartThinking, Thinking: th})
-					}
+					th, _ := blockMap["thinking"].(string)
+					sig, _ := blockMap["signature"].(string)
+					parts = append(parts, canonical.ContentPart{
+						Type:             canonical.PartThinking,
+						Thinking:         th,
+						ThoughtSignature: sig,
+					})
+				case "redacted_thinking":
+					data, _ := blockMap["data"].(string)
+					parts = append(parts, canonical.ContentPart{
+						Type:             canonical.PartThinking,
+						ThoughtSignature: data,
+					})
 				case "image":
 					if src, ok := blockMap["source"].(map[string]any); ok {
 						mime, _ := src["media_type"].(string)

@@ -1,5 +1,7 @@
 package anthropic
 
+import "encoding/json"
+
 type MessageRequest struct {
 	Model       string          `json:"model"`
 	Messages    []Message       `json:"messages"`
@@ -19,13 +21,17 @@ type Message struct {
 }
 
 type ContentBlock struct {
-	Type string `json:"type"` // "text", "image", "tool_use", "tool_result", "thinking"
+	Type string `json:"type"` // "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking"
 
 	// text
 	Text string `json:"text,omitempty"`
 
 	// thinking
-	Thinking string `json:"thinking,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+
+	// redacted_thinking
+	Data string `json:"data,omitempty"`
 
 	// image
 	Source *ImageSource `json:"source,omitempty"`
@@ -39,6 +45,28 @@ type ContentBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   any    `json:"content,omitempty"` // string or []ContentBlock
 	IsError   bool   `json:"is_error,omitempty"`
+}
+
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	type Alias ContentBlock
+	if b.Type == "thinking" {
+		m := map[string]any{
+			"type":     "thinking",
+			"thinking": b.Thinking,
+		}
+		if b.Signature != "" {
+			m["signature"] = b.Signature
+		}
+		return json.Marshal(m)
+	}
+	if b.Type == "redacted_thinking" {
+		m := map[string]any{
+			"type": "redacted_thinking",
+			"data": b.Data,
+		}
+		return json.Marshal(m)
+	}
+	return json.Marshal((*Alias)(&b))
 }
 
 type ImageSource struct {
@@ -90,6 +118,7 @@ type StreamDelta struct {
 	Type         string `json:"type,omitempty"`
 	Text         string `json:"text,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 	PartialJSON  string `json:"partial_json,omitempty"`
 	StopReason   string `json:"stop_reason,omitempty"`
 }

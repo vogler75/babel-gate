@@ -45,6 +45,27 @@ func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient 
 func (c *Client) Name() string { return c.name }
 func (c *Client) Type() string { return "anthropic" }
 
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
+func (c *Client) HTTPClient() *http.Client {
+	if c.httpClient == nil {
+		return http.DefaultClient
+	}
+	return c.httpClient
+}
+
+func (c *Client) ResolveAPIKey(clientToken string) string {
+	if c.apiKey != "" && !strings.HasPrefix(c.apiKey, "${") {
+		return c.apiKey
+	}
+	if clientToken != "" && !strings.HasPrefix(clientToken, "dummy") && !strings.HasPrefix(clientToken, "test") {
+		return clientToken
+	}
+	return c.apiKey
+}
+
 func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
 	if c.apiKey != "" && !strings.HasPrefix(c.apiKey, "${") {
 		return c.apiKey

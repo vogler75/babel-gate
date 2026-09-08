@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -176,6 +177,108 @@ func TestAnthropicListModelsSDCCatalog(t *testing.T) {
 		if models[i].ID != exp {
 			t.Errorf("expected model %d ID to be %q, got %q", i, exp, models[i].ID)
 		}
+	}
+}
+
+func TestThinkingBlockMarshalJSON(t *testing.T) {
+	// 1. Thinking block with empty string must NOT omit thinking field
+	blockEmpty := ContentBlock{
+		Type:     "thinking",
+		Thinking: "",
+	}
+	dataEmpty, err := json.Marshal(blockEmpty)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	expectedEmpty := `{"thinking":"","type":"thinking"}`
+	if string(dataEmpty) != expectedEmpty {
+		t.Errorf("expected %s, got %s", expectedEmpty, string(dataEmpty))
+	}
+
+	// 2. Thinking block with content and signature
+	blockWithSig := ContentBlock{
+		Type:      "thinking",
+		Thinking:  "pondering...",
+		Signature: "sig_abc123",
+	}
+	dataWithSig, err := json.Marshal(blockWithSig)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var resMap map[string]string
+	if err := json.Unmarshal(dataWithSig, &resMap); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if resMap["type"] != "thinking" || resMap["thinking"] != "pondering..." || resMap["signature"] != "sig_abc123" {
+		t.Errorf("unexpected json: %s", string(dataWithSig))
+	}
+
+	// 3. Text block must NOT contain thinking field
+	textBlock := ContentBlock{
+		Type: "text",
+		Text: "hello",
+	}
+	textData, err := json.Marshal(textBlock)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var textMap map[string]any
+	if err := json.Unmarshal(textData, &textMap); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if _, ok := textMap["thinking"]; ok {
+		t.Errorf("thinking field should not be present in text block: %s", string(textData))
+	}
+}
+
+func TestThinkingSignaturePreservation(t *testing.T) {
+	rawJSON := `{
+		"model": "claude-3-7-sonnet-20250219",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "thinking",
+						"thinking": "thought details",
+						"signature": "sig_cryptographic_test"
+					}
+				]
+			}
+		],
+		"max_tokens": 1000
+	}`
+
+	var req MessageRequest
+	if err := json.Unmarshal([]byte(rawJSON), &req); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	canonReq, err := FromAnthropicRequest(&req)
+	if err != nil {
+		t.Fatalf("FromAnthropicRequest failed: %v", err)
+	}
+
+	if len(canonReq.Messages) != 1 || len(canonReq.Messages[0].Parts) != 1 {
+		t.Fatalf("expected 1 msg and 1 part, got: %+v", canonReq.Messages)
+	}
+
+	part := canonReq.Messages[0].Parts[0]
+	if part.Type != canonical.PartThinking || part.Thinking != "thought details" || part.ThoughtSignature != "sig_cryptographic_test" {
+		t.Errorf("canonical part mismatch: %+v", part)
+	}
+
+	toAnthReq, err := ToAnthropicRequest(canonReq)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest failed: %v", err)
+	}
+
+	anthBlocks, ok := toAnthReq.Messages[0].Content.([]ContentBlock)
+	if !ok || len(anthBlocks) != 1 {
+		t.Fatalf("expected []ContentBlock with 1 item, got: %+v", toAnthReq.Messages[0].Content)
+	}
+	if anthBlocks[0].Signature != "sig_cryptographic_test" {
+		t.Errorf("signature not preserved in ToAnthropicRequest: %+v", anthBlocks[0])
 	}
 }
 
