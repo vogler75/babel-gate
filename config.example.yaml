@@ -8,6 +8,11 @@ server:
   cors_origins:
     - "*"
 
+# Metrics & Database persistence (SQLite)
+database:
+  path: "data/metrics.db"
+  retention_days: 90 # Days to keep metrics (0 = keep forever)
+
 # Upstream LLM Providers
 # API keys support environment variable interpolation like ${ENV_VAR} or $ENV_VAR.
 # If config.yaml is omitted, providers are automatically initialized from:

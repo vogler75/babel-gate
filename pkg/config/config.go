@@ -37,11 +37,18 @@ type RoutingConfig struct {
 	Fallbacks map[string][]string `yaml:"fallbacks"`
 }
 
+// DatabaseConfig defines settings for persistent metrics storage.
+type DatabaseConfig struct {
+	Path          string `yaml:"path"`           // Path to SQLite database, defaults to "data/metrics.db"
+	RetentionDays int    `yaml:"retention_days"`  // Days to keep metrics, defaults to 90 (0 = keep forever)
+}
+
 // Config is the top-level configuration structure.
 type Config struct {
 	Server    ServerConfig              `yaml:"server"`
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	Routing   RoutingConfig             `yaml:"routing"`
+	Database  DatabaseConfig            `yaml:"database"`
 }
 
 var envRegex = regexp.MustCompile(`\$\{([a-zA-Z_0-9]+)\}|\$([a-zA-Z_0-9]+)`)
@@ -96,6 +103,10 @@ func Load(path string) (*Config, error) {
 			Routes:    make(map[string]string),
 			Fallbacks: make(map[string][]string),
 		},
+		Database: DatabaseConfig{
+			Path:          "data/metrics.db",
+			RetentionDays: 90,
+		},
 	}
 
 	if path != "" {
@@ -123,6 +134,18 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.TimeoutSeconds == 0 {
 		cfg.Server.TimeoutSeconds = 120
+	}
+
+	if dbPath := os.Getenv("DATABASE_PATH"); dbPath != "" {
+		cfg.Database.Path = dbPath
+	}
+	if cfg.Database.Path == "" {
+		cfg.Database.Path = "data/metrics.db"
+	}
+	if retStr := os.Getenv("METRICS_RETENTION_DAYS"); retStr != "" {
+		if r, err := strconv.Atoi(retStr); err == nil && r >= 0 {
+			cfg.Database.RetentionDays = r
+		}
 	}
 
 	return cfg, nil

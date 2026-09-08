@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
@@ -185,4 +186,52 @@ func TestDeleteSessionAndEviction(t *testing.T) {
 		t.Errorf("expected at most 3 sessions due to eviction, got %d", len(mgr.ListSessions()))
 	}
 }
+
+type mockRecorder struct {
+	records []struct {
+		provider    string
+		model       string
+		inTokens    int
+		outTokens   int
+		totalTokens int
+		isError     bool
+	}
+}
+
+func (m *mockRecorder) Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error {
+	m.records = append(m.records, struct {
+		provider    string
+		model       string
+		inTokens    int
+		outTokens   int
+		totalTokens int
+		isError     bool
+	}{provider, model, inTokens, outTokens, totalTokens, isError})
+	return nil
+}
+
+func TestSessionManagerMetricsRecorder(t *testing.T) {
+	mgr := NewManager()
+	rec := &mockRecorder{}
+	mgr.SetMetricsRecorder(rec)
+
+	s := mgr.GetOrCreate("sess-rec-1", "127.0.0.1", "test", "Tester")
+	mgr.RecordRequest(s.ID, RequestRecord{
+		Provider:     "anthropic",
+		Model:        "claude-3-7-sonnet",
+		InputTokens:  100,
+		OutputTokens: 200,
+		TotalTokens:  300,
+		Status:       "success",
+	})
+
+	if len(rec.records) != 1 {
+		t.Fatalf("expected 1 record in recorder, got %d", len(rec.records))
+	}
+	r := rec.records[0]
+	if r.provider != "anthropic" || r.model != "claude-3-7-sonnet" || r.totalTokens != 300 || r.isError != false {
+		t.Errorf("unexpected record: %+v", r)
+	}
+}
+
 

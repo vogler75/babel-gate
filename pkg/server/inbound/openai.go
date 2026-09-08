@@ -57,6 +57,7 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 }
 
 func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
+	prov := h.engine.ResolveProviderName(canonReq.Model)
 	resp, err := h.engine.Execute(r.Context(), canonReq)
 	durationMs := time.Since(startTime).Milliseconds()
 	estInTokens := session.EstimateRequestTokens(canonReq)
@@ -64,6 +65,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider:     prov,
 				Model:        canonReq.Model,
 				Stream:       false,
 				DurationMs:   durationMs,
@@ -87,6 +89,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			Provider:     prov,
 			Model:        canonReq.Model,
 			Stream:       false,
 			DurationMs:   durationMs,
@@ -109,6 +112,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
+	prov := h.engine.ResolveProviderName(canonReq.Model)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -122,6 +126,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider:     prov,
 				Model:        canonReq.Model,
 				Stream:       true,
 				DurationMs:   time.Since(startTime).Milliseconds(),
@@ -274,6 +279,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			Provider:     prov,
 			Model:        canonReq.Model,
 			Stream:       true,
 			DurationMs:   time.Since(startTime).Milliseconds(),

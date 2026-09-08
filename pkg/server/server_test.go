@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/config"
+	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/router"
 )
@@ -101,6 +104,10 @@ func setupTestHandler() http.Handler {
 			Port:           8080,
 			TimeoutSeconds: 30,
 			CORSOrigins:    []string{"*"},
+		},
+		Database: config.DatabaseConfig{
+			Path:          os.TempDir() + "/babelgate_test_metrics.db",
+			RetentionDays: 90,
 		},
 		Routing: config.RoutingConfig{
 			Routes: map[string]string{
@@ -603,5 +610,95 @@ func TestDashboardAndSetupHelpPages(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsAPIEndToEnd(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test_metrics.db"
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:           8080,
+			TimeoutSeconds: 30,
+			CORSOrigins:    []string{"*"},
+		},
+		Database: config.DatabaseConfig{
+			Path:          dbPath,
+			RetentionDays: 90,
+		},
+		Routing: config.RoutingConfig{
+			Routes: map[string]string{
+				"claude-3-7-sonnet": "google/gemini-2.5-pro",
+			},
+		},
+	}
+
+	engine, _ := router.NewEngine(cfg)
+	engine.RegisterProvider(&mockUpstreamGoogle{})
+	engine.RegisterProvider(&mockUpstreamOpenAI{})
+
+	srv := NewServer(cfg, engine)
+	defer srv.Shutdown(context.Background())
+	handler := srv.httpServer.Handler
+
+	// 1. Send request through /v1/messages (mapped to Google)
+	msgPayload := map[string]any{
+		"model": "claude-3-7-sonnet",
+		"messages": []map[string]any{
+			{"role": "user", "content": "Hello metrics test"},
+		},
+		"max_tokens": 100,
+	}
+	bMsg, _ := json.Marshal(msgPayload)
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(bMsg))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /v1/messages, got %d", rec1.Code)
+	}
+
+	// 2. Query /api/metrics/summary
+	reqSum := httptest.NewRequest(http.MethodGet, "/api/metrics/summary", nil)
+	recSum := httptest.NewRecorder()
+	handler.ServeHTTP(recSum, reqSum)
+	if recSum.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/metrics/summary, got %d", recSum.Code)
+	}
+
+	var sum metrics.MetricsSummary
+	if err := json.NewDecoder(recSum.Body).Decode(&sum); err != nil {
+		t.Fatalf("failed to decode metrics summary: %v", err)
+	}
+	if sum.Requests != 1 {
+		t.Errorf("expected 1 request in summary, got %d", sum.Requests)
+	}
+	if sum.TotalTokens != 30 {
+		t.Errorf("expected 30 total tokens in summary, got %d", sum.TotalTokens)
+	}
+	if len(sum.TopModels) == 0 {
+		t.Fatalf("expected at least 1 top model in summary")
+	}
+	if sum.TopModels[0].Provider != "google" {
+		t.Errorf("expected provider 'google', got %q", sum.TopModels[0].Provider)
+	}
+
+	// 3. Query /api/metrics/daily
+	reqDaily := httptest.NewRequest(http.MethodGet, "/api/metrics/daily", nil)
+	recDaily := httptest.NewRecorder()
+	handler.ServeHTTP(recDaily, reqDaily)
+	if recDaily.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/metrics/daily, got %d", recDaily.Code)
+	}
+
+	// 4. Query /api/metrics/hourly for today
+	todayStr := time.Now().UTC().Format("2006-01-02")
+	reqHourly := httptest.NewRequest(http.MethodGet, "/api/metrics/hourly?date="+todayStr, nil)
+	recHourly := httptest.NewRecorder()
+	handler.ServeHTTP(recHourly, reqHourly)
+	if recHourly.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/metrics/hourly, got %d", recHourly.Code)
+	}
+}
+
 
 

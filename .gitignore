@@ -19,3 +19,9 @@ config.yaml
 
 # Others
 hidden
+
+# Data & SQLite
+data/
+*.db
+*.db-wal
+*.db-shm

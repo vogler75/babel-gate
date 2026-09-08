@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
+	"time"
 
+	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/providers/copilot"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/session"
@@ -15,13 +18,15 @@ type DashboardHandler struct {
 	engine   *router.Engine
 	catalog  *router.Catalog
 	sessions *session.Manager
+	metrics  *metrics.Store
 }
 
-func NewDashboardHandler(engine *router.Engine, catalog *router.Catalog, sessions *session.Manager) *DashboardHandler {
+func NewDashboardHandler(engine *router.Engine, catalog *router.Catalog, sessions *session.Manager, metrics *metrics.Store) *DashboardHandler {
 	return &DashboardHandler{
 		engine:   engine,
 		catalog:  catalog,
 		sessions: sessions,
+		metrics:  metrics,
 	}
 }
 
@@ -49,6 +54,15 @@ func (d *DashboardHandler) HandleAPIStatus(w http.ResponseWriter, r *http.Reques
 			"priority": d.engine.GetProviderPriority(name),
 		})
 	}
+
+	sort.Slice(provList, func(i, j int) bool {
+		prioI := provList[i]["priority"].(int)
+		prioJ := provList[j]["priority"].(int)
+		if prioI != prioJ {
+			return prioI < prioJ
+		}
+		return provList[i]["name"].(string) < provList[j]["name"].(string)
+	})
 
 	routes := d.engine.GetRoutes()
 
@@ -114,6 +128,111 @@ func (d *DashboardHandler) HandleAPIClearSessions(w http.ResponseWriter, r *http
 
 	d.sessions.Clear()
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+}
+
+func (d *DashboardHandler) HandleAPIMetricsSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if d.metrics == nil {
+		_ = json.NewEncoder(w).Encode(&metrics.MetricsSummary{})
+		return
+	}
+
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+	provider := r.URL.Query().Get("provider")
+
+	now := time.Now().UTC()
+	start := now.AddDate(0, 0, -6)
+	end := now
+
+	if startStr != "" {
+		if t, err := time.Parse("2006-01-02", startStr); err == nil {
+			start = t
+		}
+	}
+	if endStr != "" {
+		if t, err := time.Parse("2006-01-02", endStr); err == nil {
+			end = t
+		}
+	}
+
+	summary, err := d.metrics.GetSummary(start, end, provider)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(summary)
+}
+
+func (d *DashboardHandler) HandleAPIMetricsDaily(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if d.metrics == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"days": []any{}})
+		return
+	}
+
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+	provider := r.URL.Query().Get("provider")
+
+	now := time.Now().UTC()
+	start := now.AddDate(0, 0, -6)
+	end := now
+
+	if startStr != "" {
+		if t, err := time.Parse("2006-01-02", startStr); err == nil {
+			start = t
+		}
+	}
+	if endStr != "" {
+		if t, err := time.Parse("2006-01-02", endStr); err == nil {
+			end = t
+		}
+	}
+
+	days, err := d.metrics.GetDailyMetrics(start, end, provider)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"days":       days,
+		"start_date": start.Format("2006-01-02"),
+		"end_date":   end.Format("2006-01-02"),
+		"provider":   provider,
+	})
+}
+
+func (d *DashboardHandler) HandleAPIMetricsHourly(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if d.metrics == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"hours": []any{}})
+		return
+	}
+
+	dateStr := r.URL.Query().Get("date")
+	provider := r.URL.Query().Get("provider")
+
+	day := time.Now().UTC()
+	if dateStr != "" {
+		if t, err := time.Parse("2006-01-02", dateStr); err == nil {
+			day = t
+		}
+	}
+
+	hours, err := d.metrics.GetHourlyMetrics(day, provider)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"date":     day.Format("2006-01-02"),
+		"hours":    hours,
+		"provider": provider,
+	})
 }
 
 func (d *DashboardHandler) HandleCopilotDeviceCode(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +405,25 @@ const dashboardHTML = `<!DOCTYPE html>
     .sub-table th { background: #161b22; }
     
     #responseOutput { min-height: 120px; white-space: pre-wrap; word-break: break-word; color: #7ee787; }
+    
+    /* Analytics & Stacked Bar Chart Styles */
+    .analytics-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+    .filter-group { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+    .range-btn { background: #21262d; border: 1px solid var(--border); color: #c9d1d9; padding: 0.3rem 0.65rem; font-size: 0.78rem; font-weight: 500; border-radius: 6px; cursor: pointer; transition: all 0.15s; }
+    .range-btn:hover { background: #30363d; color: var(--text-bright); }
+    .range-btn.active { background: #1f6feb; border-color: #388bfd; color: #fff; font-weight: 600; }
+    .date-input { width: 125px; min-width: 110px; max-width: 130px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-bright); padding: 0.25rem 0.4rem; font-size: 0.78rem; outline: none; color-scheme: dark; box-sizing: border-box; flex-shrink: 0; }
+    .select-input { width: auto; min-width: 120px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-bright); padding: 0.25rem 0.5rem; font-size: 0.78rem; outline: none; box-sizing: border-box; }
+    .chart-container { position: relative; width: 100%; background: #0c1017; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-top: 0.5rem; min-height: 320px; display: flex; flex-direction: column; }
+    .chart-tooltip { position: absolute; display: none; background: #1c2128; border: 1px solid #444c56; border-radius: 8px; padding: 0.75rem 1rem; color: #f0f6fc; font-size: 0.8rem; pointer-events: none; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.55); min-width: 220px; max-width: 320px; }
+    .chart-tooltip h4 { margin-bottom: 0.35rem; font-size: 0.85rem; color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.25rem; display: flex; justify-content: space-between; align-items: center; }
+    .chart-legend { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); font-size: 0.78rem; }
+    .legend-item { display: inline-flex; align-items: center; gap: 0.4rem; background: #161b22; padding: 0.25rem 0.55rem; border-radius: 6px; border: 1px solid var(--border); }
+    .legend-color { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+    .bar-group { cursor: pointer; }
+    .bar-group:hover rect { filter: brightness(1.2); }
+    .axis-label { fill: #8b949e; font-size: 11px; font-family: -apple-system, sans-serif; }
+    .grid-line { stroke: #21262d; stroke-dasharray: 2, 2; }
   </style>
 </head>
 <body>
@@ -320,6 +458,98 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="stat-title">Total Tokens</div>
         <div class="stat-val stat-total" id="statTotalTokens">0</div>
       </div>
+    </div>
+
+    <!-- Persistent Token Analytics & Trends (SQLite) -->
+    <div class="card" style="margin-bottom: 1.75rem;">
+      <div class="analytics-header">
+        <div>
+          <h2 style="margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem;">
+            📊 Historical Token Analytics
+            <span class="badge" style="color: #3fb950; border-color: #238636;">SQLite Store</span>
+          </h2>
+          <div style="font-size: 0.78rem; color: #8b949e;">
+            Hourly aggregated counters per provider and model. Click any day bar to zoom into the 24-hour hourly view.
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+          <button id="zoomBackBtn" class="btn-sm" style="display: none; background: #1f6feb; color: white; border-color: #388bfd;" onclick="zoomBackToDaily()">← Back to Daily View</button>
+          <button class="btn-sm" onclick="loadAnalytics()">↻ Refresh Metrics</button>
+        </div>
+      </div>
+
+      <!-- Controls Bar: Range Presets, Custom Dates, Provider Filter -->
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; background: #11151c; padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 1rem;">
+        <div class="filter-group">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">RANGE:</span>
+          <button class="range-btn" id="btn-range-24h" onclick="selectRange('24h')">24h</button>
+          <button class="range-btn active" id="btn-range-7d" onclick="selectRange('7d')">7 Days</button>
+          <button class="range-btn" id="btn-range-14d" onclick="selectRange('14d')">14 Days</button>
+          <button class="range-btn" id="btn-range-30d" onclick="selectRange('30d')">30 Days</button>
+          <button class="range-btn" id="btn-range-90d" onclick="selectRange('90d')">90 Days</button>
+        </div>
+
+        <div class="filter-group" style="flex-wrap: nowrap;">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">CUSTOM:</span>
+          <input type="date" id="customStartDate" class="date-input">
+          <span style="color: #8b949e; font-size: 0.8rem;">to</span>
+          <input type="date" id="customEndDate" class="date-input">
+          <button class="btn-sm" onclick="applyCustomRange()">Apply</button>
+        </div>
+
+        <div class="filter-group" style="flex-wrap: nowrap;">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">PROVIDER:</span>
+          <select id="metricsProviderSelect" class="select-input" onchange="onMetricsProviderChange()">
+            <option value="">All Providers</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- View Title & Top Model Banner -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; font-size: 0.85rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div id="analyticsViewTitle" style="font-weight: 600; color: #f0f6fc;">
+          📅 Daily View
+        </div>
+        <div id="analyticsTopModelBanner" style="color: #8b949e; font-size: 0.8rem;"></div>
+      </div>
+
+      <!-- Summary KPI Strip -->
+      <div class="stats-grid" style="margin-bottom: 1rem; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Period Tokens</div>
+          <div class="stat-val stat-total" id="kpiTotalTokens" style="font-size: 1.35rem;">0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Input Tokens</div>
+          <div class="stat-val stat-in" id="kpiInputTokens" style="font-size: 1.35rem;">0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Output Tokens</div>
+          <div class="stat-val stat-out" id="kpiOutputTokens" style="font-size: 1.35rem;">0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Requests</div>
+          <div class="stat-val" id="kpiRequests" style="font-size: 1.35rem;">0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Errors</div>
+          <div class="stat-val" id="kpiErrors" style="font-size: 1.35rem; color: #f85149;">0</div>
+        </div>
+      </div>
+
+      <!-- Chart Container & Tooltip -->
+      <div class="chart-container" id="chartWrapper">
+        <div id="chartTooltip" class="chart-tooltip"></div>
+        <div id="chartEmpty" style="display: none; margin: auto; text-align: center; color: #8b949e; padding: 2.5rem 1rem;">
+          <div style="font-size: 1.8rem; margin-bottom: 0.4rem;">📊</div>
+          <div style="font-weight: 600; color: #c9d1d9;">No metrics recorded for this time range</div>
+          <div style="font-size: 0.8rem; margin-top: 0.2rem;">Send requests through the router or use the playground below.</div>
+        </div>
+        <div id="chartSvgWrapper" style="width: 100%; height: 320px; position: relative;"></div>
+      </div>
+
+      <!-- Chart Model Legend -->
+      <div class="chart-legend" id="chartLegend"></div>
     </div>
 
     <!-- Active Sessions & Token Usage Card -->
@@ -661,6 +891,12 @@ const dashboardHTML = `<!DOCTYPE html>
         ]);
 
         allProviders = statusRes.providers || [];
+        allProviders.sort((a, b) => {
+          const pA = a.priority !== undefined ? a.priority : 100;
+          const pB = b.priority !== undefined ? b.priority : 100;
+          if (pA !== pB) return pA - pB;
+          return String(a.name || '').localeCompare(String(b.name || ''));
+        });
         allModels = modelsRes.models || [];
 
         // Providers table
@@ -831,14 +1067,405 @@ const dashboardHTML = `<!DOCTYPE html>
         metricsSpan.textContent = 'Error: ' + err.message;
       } finally {
         btn.disabled = false;
-        // Refresh sessions immediately to show updated counts
+        // Refresh sessions and analytics immediately
         loadSessions();
+        loadAnalytics();
       }
+    }
+
+    // ----------------------------------------------------
+    // Historical Token Analytics (SQLite Store)
+    // ----------------------------------------------------
+    let analyticsMode = 'daily'; // 'daily' or 'hourly'
+    let activeRangePreset = '7d';
+    let customStart = '';
+    let customEnd = '';
+    let selectedMetricsProvider = '';
+    let currentZoomDate = '';
+    let cachedDailyData = [];
+    const modelColorMap = {};
+    const chartPalette = [
+      '#388bfd', '#2ea043', '#bc8cff', '#f0883e', '#56d4dd',
+      '#e3b341', '#f778ba', '#39d353', '#79c0ff', '#d2a8ff',
+      '#ff7b72', '#a5d6ff', '#ffa657', '#a2d2fb', '#7ee787'
+    ];
+    let nextPaletteIndex = 0;
+
+    function getModelColor(model) {
+      if (!modelColorMap[model]) {
+        modelColorMap[model] = chartPalette[nextPaletteIndex % chartPalette.length];
+        nextPaletteIndex++;
+      }
+      return modelColorMap[model];
+    }
+
+    function formatShortNumber(num) {
+      if (num == null || num === 0) return '0';
+      if (num >= 1000000) {
+        return (num / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+      }
+      if (num >= 1000) {
+        return (num / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+      }
+      return String(num);
+    }
+
+    function getDateRangeForPreset(preset) {
+      const end = new Date();
+      const start = new Date();
+      if (preset === '24h') {
+        start.setDate(start.getDate() - 1);
+      } else if (preset === '7d') {
+        start.setDate(start.getDate() - 6);
+      } else if (preset === '14d') {
+        start.setDate(start.getDate() - 13);
+      } else if (preset === '30d') {
+        start.setDate(start.getDate() - 29);
+      } else if (preset === '90d') {
+        start.setDate(start.getDate() - 89);
+      }
+      return {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10)
+      };
+    }
+
+    function selectRange(preset) {
+      activeRangePreset = preset;
+      analyticsMode = 'daily';
+      currentZoomDate = '';
+      const backBtn = document.getElementById('zoomBackBtn');
+      if (backBtn) backBtn.style.display = 'none';
+
+      ['24h', '7d', '14d', '30d', '90d'].forEach(p => {
+        const btn = document.getElementById('btn-range-' + p);
+        if (btn) btn.classList.toggle('active', p === preset);
+      });
+
+      const range = getDateRangeForPreset(preset);
+      customStart = range.start;
+      customEnd = range.end;
+      const sInput = document.getElementById('customStartDate');
+      const eInput = document.getElementById('customEndDate');
+      if (sInput) sInput.value = range.start;
+      if (eInput) eInput.value = range.end;
+
+      loadAnalytics();
+    }
+
+    function applyCustomRange() {
+      const s = document.getElementById('customStartDate').value;
+      const e = document.getElementById('customEndDate').value;
+      if (!s || !e) return;
+      customStart = s;
+      customEnd = e;
+      activeRangePreset = 'custom';
+      analyticsMode = 'daily';
+      currentZoomDate = '';
+      const backBtn = document.getElementById('zoomBackBtn');
+      if (backBtn) backBtn.style.display = 'none';
+
+      ['24h', '7d', '14d', '30d', '90d'].forEach(p => {
+        const btn = document.getElementById('btn-range-' + p);
+        if (btn) btn.classList.remove('active');
+      });
+
+      loadAnalytics();
+    }
+
+    function onMetricsProviderChange() {
+      selectedMetricsProvider = document.getElementById('metricsProviderSelect').value;
+      if (analyticsMode === 'hourly' && currentZoomDate) {
+        loadHourlyMetrics(currentZoomDate);
+      } else {
+        loadAnalytics();
+      }
+    }
+
+    function zoomIntoDay(dateStr) {
+      analyticsMode = 'hourly';
+      currentZoomDate = dateStr;
+      const backBtn = document.getElementById('zoomBackBtn');
+      if (backBtn) backBtn.style.display = 'inline-block';
+      const titleEl = document.getElementById('analyticsViewTitle');
+      if (titleEl) titleEl.innerHTML = '🔍 Zoomed into: <strong>' + escapeHtml(dateStr) + '</strong> (24-Hour Breakdown)';
+      loadHourlyMetrics(dateStr);
+    }
+
+    function zoomBackToDaily() {
+      analyticsMode = 'daily';
+      currentZoomDate = '';
+      const backBtn = document.getElementById('zoomBackBtn');
+      if (backBtn) backBtn.style.display = 'none';
+      loadAnalytics();
+    }
+
+    async function loadAnalytics() {
+      if (analyticsMode === 'hourly' && currentZoomDate) {
+        loadHourlyMetrics(currentZoomDate);
+        return;
+      }
+
+      if (!customStart || !customEnd) {
+        const r = getDateRangeForPreset(activeRangePreset);
+        customStart = r.start;
+        customEnd = r.end;
+        const sInput = document.getElementById('customStartDate');
+        const eInput = document.getElementById('customEndDate');
+        if (sInput) sInput.value = r.start;
+        if (eInput) eInput.value = r.end;
+      }
+
+      const titleEl = document.getElementById('analyticsViewTitle');
+      if (titleEl) titleEl.innerHTML = '📅 Daily View: <strong>' + escapeHtml(customStart) + '</strong> to <strong>' + escapeHtml(customEnd) + '</strong>';
+
+      try {
+        const pParam = selectedMetricsProvider ? ('&provider=' + encodeURIComponent(selectedMetricsProvider)) : '';
+        const [dailyRes, sumRes] = await Promise.all([
+          fetch('/api/metrics/daily?start=' + customStart + '&end=' + customEnd + pParam).then(r => r.json()),
+          fetch('/api/metrics/summary?start=' + customStart + '&end=' + customEnd + pParam).then(r => r.json())
+        ]);
+
+        // Populate provider dropdown if empty
+        const pSelect = document.getElementById('metricsProviderSelect');
+        if (pSelect && pSelect.children.length <= 1 && sumRes && sumRes.available_providers) {
+          sumRes.available_providers.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p.toUpperCase();
+            pSelect.appendChild(opt);
+          });
+          if (selectedMetricsProvider) pSelect.value = selectedMetricsProvider;
+        }
+
+        cachedDailyData = dailyRes.days || [];
+        renderAnalytics(cachedDailyData, sumRes, false);
+      } catch (err) {
+        console.error('Failed to load daily analytics:', err);
+      }
+    }
+
+    async function loadHourlyMetrics(dateStr) {
+      try {
+        const pParam = selectedMetricsProvider ? ('&provider=' + encodeURIComponent(selectedMetricsProvider)) : '';
+        const [hourlyRes, sumRes] = await Promise.all([
+          fetch('/api/metrics/hourly?date=' + dateStr + pParam).then(r => r.json()),
+          fetch('/api/metrics/summary?start=' + dateStr + '&end=' + dateStr + pParam).then(r => r.json())
+        ]);
+
+        renderAnalytics(hourlyRes.hours || [], sumRes, true, dateStr);
+      } catch (err) {
+        console.error('Failed to load hourly analytics:', err);
+      }
+    }
+
+    function renderAnalytics(buckets, summary, isHourly, activeDate) {
+      // Update KPI cards
+      const s = summary || {};
+      document.getElementById('kpiTotalTokens').textContent = formatNumber(s.total_tokens || 0);
+      document.getElementById('kpiInputTokens').textContent = formatNumber(s.input_tokens || 0);
+      document.getElementById('kpiOutputTokens').textContent = formatNumber(s.output_tokens || 0);
+      document.getElementById('kpiRequests').textContent = formatNumber(s.requests || 0);
+      document.getElementById('kpiErrors').textContent = formatNumber(s.errors || 0);
+
+      const bannerEl = document.getElementById('analyticsTopModelBanner');
+      if (s.top_models && s.top_models.length > 0) {
+        const topM = s.top_models[0];
+        bannerEl.innerHTML = 'Top Model: <strong>' + escapeHtml(topM.model) + '</strong> (' + formatNumber(topM.total_tokens) + ' tokens)';
+      } else {
+        bannerEl.textContent = '';
+      }
+
+      const emptyEl = document.getElementById('chartEmpty');
+      const svgWrapper = document.getElementById('chartSvgWrapper');
+
+      if (!buckets || buckets.length === 0 || (s.total_tokens === 0 && s.requests === 0)) {
+        emptyEl.style.display = 'block';
+        svgWrapper.innerHTML = '';
+        document.getElementById('chartLegend').innerHTML = '';
+        return;
+      }
+      emptyEl.style.display = 'none';
+
+      // Dimensions
+      const vbWidth = 1000;
+      const vbHeight = 300;
+      const marginLeft = 65;
+      const marginRight = 20;
+      const marginTop = 20;
+      const marginBottom = 40;
+      const plotWidth = vbWidth - marginLeft - marginRight;
+      const plotHeight = vbHeight - marginTop - marginBottom;
+      const baselineY = marginTop + plotHeight;
+
+      const maxVal = Math.max(...buckets.map(b => Number(b.total_tokens) || 0), 100);
+
+      // SVG Elements
+      let svg = '<svg viewBox="0 0 ' + vbWidth + ' ' + vbHeight + '" preserveAspectRatio="none" style="width: 100%; height: 100%; overflow: visible;">';
+
+      // 1. Gridlines and Y-axis labels
+      const gridTicks = [0, 0.25, 0.5, 0.75, 1.0];
+      gridTicks.forEach(tick => {
+        const y = Math.round(baselineY - tick * plotHeight);
+        const val = Math.round(tick * maxVal);
+        svg += '<line x1="' + marginLeft + '" y1="' + y + '" x2="' + (marginLeft + plotWidth) + '" y2="' + y + '" class="grid-line" />';
+        svg += '<text x="' + (marginLeft - 8) + '" y="' + (y + 4) + '" text-anchor="end" class="axis-label">' + formatShortNumber(val) + '</text>';
+      });
+
+      // 2. Bars
+      const n = buckets.length;
+      const slotWidth = plotWidth / n;
+      const barWidth = Math.max(6, Math.min(42, slotWidth * 0.74));
+
+      // Tooltip data lookup
+      window.__chartBucketData = buckets;
+
+      buckets.forEach((b, idx) => {
+        const x = marginLeft + idx * slotWidth + (slotWidth - barWidth) / 2;
+        const totalTok = Number(b.total_tokens) || 0;
+        const clickAttr = isHourly ? '' : 'onclick="zoomIntoDay(\'' + escapeHtml(b.date) + '\')"';
+        const cursorStyle = isHourly ? 'cursor: default;' : 'cursor: pointer;';
+
+        svg += '<g class="bar-group" style="' + cursorStyle + '" ' + clickAttr + ' onmouseenter="showChartTooltip(event, ' + idx + ', ' + isHourly + ')" onmousemove="moveChartTooltip(event)" onmouseleave="hideChartTooltip()">';
+
+        // Invisible hover hit area for easy targeting
+        svg += '<rect x="' + (marginLeft + idx * slotWidth) + '" y="' + marginTop + '" width="' + slotWidth + '" height="' + (plotHeight + marginBottom) + '" fill="transparent" />';
+
+        if (totalTok === 0) {
+          // Zero tokens placeholder
+          svg += '<rect x="' + x + '" y="' + (baselineY - 2) + '" width="' + barWidth + '" height="2" fill="#21262d" rx="1" />';
+        } else {
+          // Stacked segments:
+          // Requirement: "the bar should be a stack bar showing the most amount used tokens of a model at top and etc."
+          // Sort models in ascending order so smaller ones are placed at bottom and LARGEST is at the very TOP!
+          const modelsAsc = [...(b.models || [])].sort((m1, m2) => (m1.total_tokens || 0) - (m2.total_tokens || 0));
+
+          let currentY = baselineY;
+          modelsAsc.forEach((m, mIdx) => {
+            const mTok = Number(m.total_tokens) || 0;
+            if (mTok <= 0) return;
+            const segH = Math.max(2, Math.round((mTok / maxVal) * plotHeight));
+            currentY -= segH;
+            const color = getModelColor(m.model);
+            const isTop = (mIdx === modelsAsc.length - 1);
+            const rx = isTop ? '2' : '0';
+            svg += '<rect class="bar-segment" x="' + x + '" y="' + currentY + '" width="' + barWidth + '" height="' + segH + '" fill="' + color + '" rx="' + rx + '" />';
+          });
+        }
+
+        // X-Axis Labels
+        let labelText = '';
+        let showLabel = true;
+        if (isHourly) {
+          labelText = b.hour + ':00';
+          if (n > 12 && idx % 2 !== 0 && idx !== n - 1) showLabel = false;
+        } else {
+          // Format date: "09-08"
+          const parts = (b.date || '').split('-');
+          labelText = parts.length === 3 ? (parts[1] + '/' + parts[2]) : b.date;
+          if (n > 14 && idx % Math.ceil(n / 10) !== 0 && idx !== n - 1) showLabel = false;
+        }
+
+        if (showLabel) {
+          svg += '<text x="' + (x + barWidth / 2) + '" y="' + (baselineY + 18) + '" text-anchor="middle" class="axis-label">' + escapeHtml(labelText) + '</text>';
+        }
+
+        svg += '</g>';
+      });
+
+      svg += '</svg>';
+      svgWrapper.innerHTML = svg;
+
+      // 3. Render Legend
+      const legendEl = document.getElementById('chartLegend');
+      let legendHtml = '';
+      if (s.top_models && s.top_models.length > 0) {
+        s.top_models.forEach(m => {
+          const color = getModelColor(m.model);
+          const pBadge = m.provider ? ('<span style="color: #8b949e; font-size: 0.72rem; margin-left: 0.2rem;">[' + escapeHtml(m.provider) + ']</span>') : '';
+          legendHtml += '<div class="legend-item">' +
+            '<span class="legend-color" style="background: ' + color + ';"></span>' +
+            '<span>' + escapeHtml(m.model) + '</span>' + pBadge +
+            '<strong style="color: #58a6ff; margin-left: 0.25rem;">' + formatShortNumber(m.total_tokens) + '</strong>' +
+            '</div>';
+        });
+      }
+      legendEl.innerHTML = legendHtml;
+    }
+
+    function showChartTooltip(event, idx, isHourly) {
+      const tooltip = document.getElementById('chartTooltip');
+      const buckets = window.__chartBucketData;
+      if (!tooltip || !buckets || !buckets[idx]) return;
+
+      const b = buckets[idx];
+      const title = isHourly ? ('Hour ' + b.hour + ':00 UTC') : ('Day ' + b.date);
+      const totalTok = Number(b.total_tokens) || 0;
+      const reqCount = Number(b.requests) || 0;
+      const errCount = Number(b.errors) || 0;
+
+      let modelsHtml = '';
+      if (b.models && b.models.length > 0) {
+        // Models sorted descending for clear reading in tooltip
+        const sortedDesc = [...b.models].sort((m1, m2) => (m2.total_tokens || 0) - (m1.total_tokens || 0));
+        modelsHtml = '<div style="margin-top: 0.5rem; border-top: 1px dashed #30363d; padding-top: 0.4rem;">';
+        sortedDesc.forEach(m => {
+          const color = getModelColor(m.model);
+          const pct = totalTok > 0 ? Math.round((m.total_tokens / totalTok) * 100) : 0;
+          modelsHtml += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem; gap: 0.5rem;">' +
+            '<div style="display: flex; align-items: center; gap: 0.35rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' +
+              '<span class="legend-color" style="background: ' + color + '; width: 8px; height: 8px;"></span>' +
+              '<span>' + escapeHtml(m.model) + '</span>' +
+            '</div>' +
+            '<div style="font-family: monospace; font-weight: 600;">' + formatNumber(m.total_tokens) + ' <span style="color: #8b949e; font-size: 0.72rem;">(' + pct + '%)</span></div>' +
+          '</div>';
+        });
+        modelsHtml += '</div>';
+      } else {
+        modelsHtml = '<div style="color: #8b949e; font-size: 0.75rem; margin-top: 0.3rem;">No requests in this period.</div>';
+      }
+
+      const hintHtml = (!isHourly && totalTok > 0)
+        ? '<div style="margin-top: 0.6rem; color: #58a6ff; font-size: 0.75rem; border-top: 1px solid #30363d; padding-top: 0.35rem;">👉 Click day to zoom into hourly breakdown</div>'
+        : '';
+
+      tooltip.innerHTML = '<h4><span>' + escapeHtml(title) + '</span><span class="token-total">' + formatNumber(totalTok) + ' tok</span></h4>' +
+        '<div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #8b949e;">' +
+          '<span>In: ' + formatNumber(b.input_tokens || 0) + ' | Out: ' + formatNumber(b.output_tokens || 0) + '</span>' +
+          '<span>Reqs: ' + reqCount + (errCount > 0 ? (' | <span style="color:#f85149">Err: ' + errCount + '</span>') : '') + '</span>' +
+        '</div>' +
+        modelsHtml +
+        hintHtml;
+
+      tooltip.style.display = 'block';
+      moveChartTooltip(event);
+    }
+
+    function moveChartTooltip(event) {
+      const tooltip = document.getElementById('chartTooltip');
+      const chartWrapper = document.getElementById('chartWrapper');
+      if (!tooltip || !chartWrapper) return;
+
+      const rect = chartWrapper.getBoundingClientRect();
+      const x = event.clientX - rect.left + 15;
+      const y = event.clientY - rect.top + 10;
+
+      const tipWidth = tooltip.offsetWidth || 220;
+      const finalX = (x + tipWidth > rect.width) ? (x - tipWidth - 30) : x;
+
+      tooltip.style.left = Math.max(10, finalX) + 'px';
+      tooltip.style.top = Math.max(10, y) + 'px';
+    }
+
+    function hideChartTooltip() {
+      const tooltip = document.getElementById('chartTooltip');
+      if (tooltip) tooltip.style.display = 'none';
     }
 
     // Initial load
     loadData();
     loadSessions();
+    loadAnalytics();
 
     // Auto-refresh sessions every 4 seconds
     setInterval(loadSessions, 4000);

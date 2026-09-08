@@ -243,6 +243,14 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 	return nil, fmt.Errorf("unable to resolve model %q to any active provider", requestedModel)
 }
 
+// ResolveProviderName returns the resolved provider name for a model, or "unknown" if unresolved.
+func (e *Engine) ResolveProviderName(model string) string {
+	if route, err := e.ResolveModel(model); err == nil && route.Provider != nil {
+		return route.Provider.Name()
+	}
+	return "unknown"
+}
+
 func (e *Engine) findProviderByType(pType string) providers.Provider {
 	for _, p := range e.providers {
 		if p.Type() == pType {

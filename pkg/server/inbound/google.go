@@ -69,6 +69,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 	sess := ResolveSession(h.sessions, r)
 	estInTokens := session.EstimateRequestTokens(canonReq)
+	prov := h.engine.ResolveProviderName(canonReq.Model)
 
 	resp, err := h.engine.Execute(r.Context(), canonReq)
 	durationMs := time.Since(startTime).Milliseconds()
@@ -76,6 +77,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider:     prov,
 				Model:        canonReq.Model,
 				Stream:       false,
 				DurationMs:   durationMs,
@@ -99,6 +101,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			Provider:     prov,
 			Model:        canonReq.Model,
 			Stream:       false,
 			DurationMs:   durationMs,
@@ -147,6 +150,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 
 	sess := ResolveSession(h.sessions, r)
 	estInTokens := session.EstimateRequestTokens(canonReq)
+	prov := h.engine.ResolveProviderName(canonReq.Model)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -160,6 +164,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider:     prov,
 				Model:        canonReq.Model,
 				Stream:       true,
 				DurationMs:   time.Since(startTime).Milliseconds(),
@@ -294,6 +299,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			Provider:     prov,
 			Model:        canonReq.Model,
 			Stream:       true,
 			DurationMs:   time.Since(startTime).Milliseconds(),

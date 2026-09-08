@@ -13,10 +13,16 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
 
+// MetricsRecorder defines an interface for persisting hourly usage counters.
+type MetricsRecorder interface {
+	Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error
+}
+
 // RequestRecord captures details of an individual LLM request within a session.
 type RequestRecord struct {
 	ID           string    `json:"id"`
 	Timestamp    time.Time `json:"timestamp"`
+	Provider     string    `json:"provider,omitempty"`
 	Model        string    `json:"model"`
 	Stream       bool      `json:"stream"`
 	DurationMs   int64     `json:"duration_ms"`
@@ -54,16 +60,17 @@ type Summary struct {
 
 // Manager manages thread-safe tracking of client sessions and token usage.
 type Manager struct {
-	mu          sync.RWMutex
-	sessions    map[string]*Session
-	order       []string // list of session IDs
-	idleTimeout time.Duration
-	sessionTTL  time.Duration // auto-purge sessions older than this (e.g. 24h)
-	maxSessions int           // max concurrent sessions to keep in memory (e.g. 200)
-	maxRequests int           // max requests to keep per session
-	totalReqs   int
-	totalInTok  int
-	totalOutTok int
+	mu              sync.RWMutex
+	sessions        map[string]*Session
+	order           []string // list of session IDs
+	idleTimeout     time.Duration
+	sessionTTL      time.Duration // auto-purge sessions older than this (e.g. 24h)
+	maxSessions     int           // max concurrent sessions to keep in memory (e.g. 200)
+	maxRequests     int           // max requests to keep per session
+	totalReqs       int
+	totalInTok      int
+	totalOutTok     int
+	metricsRecorder MetricsRecorder
 }
 
 // NewManager creates a new Session Manager with retention defaults.
@@ -76,6 +83,13 @@ func NewManager() *Manager {
 		maxSessions: 200,
 		maxRequests: 50,
 	}
+}
+
+// SetMetricsRecorder assigns a persistent metrics store to the manager.
+func (m *Manager) SetMetricsRecorder(rec MetricsRecorder) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.metricsRecorder = rec
 }
 
 // GenerateID produces a random hexadecimal session/request ID.
@@ -181,11 +195,6 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s, ok := m.sessions[sessionID]
-	if !ok {
-		return
-	}
-
 	if rec.ID == "" {
 		rec.ID = GenerateID("req")
 	}
@@ -194,6 +203,16 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	}
 	if rec.TotalTokens == 0 {
 		rec.TotalTokens = rec.InputTokens + rec.OutputTokens
+	}
+
+	if m.metricsRecorder != nil {
+		isErr := rec.Status == "error"
+		_ = m.metricsRecorder.Record(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, isErr)
+	}
+
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return
 	}
 
 	s.LastActive = rec.Timestamp

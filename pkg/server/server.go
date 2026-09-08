@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/config"
+	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/server/inbound"
 	"github.com/vogler75/babel-gate/pkg/server/web"
@@ -20,6 +21,7 @@ type Server struct {
 	engine     *router.Engine
 	catalog    *router.Catalog
 	sessions   *session.Manager
+	metrics    *metrics.Store
 	httpServer *http.Server
 }
 
@@ -27,10 +29,17 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	catalog := router.NewCatalog(engine)
 	sessions := session.NewManager()
 
+	metricsStore, err := metrics.NewStore(cfg.Database.Path, cfg.Database.RetentionDays)
+	if err != nil {
+		log.Printf("Warning: failed to initialize SQLite metrics store at %s: %v", cfg.Database.Path, err)
+	} else {
+		sessions.SetMetricsRecorder(metricsStore)
+	}
+
 	anthropicHandler := inbound.NewAnthropicHandler(engine, catalog, sessions)
 	openaiHandler := inbound.NewOpenAIHandler(engine, catalog, sessions)
 	googleHandler := inbound.NewGoogleHandler(engine, catalog, sessions)
-	dashboardHandler := web.NewDashboardHandler(engine, catalog, sessions)
+	dashboardHandler := web.NewDashboardHandler(engine, catalog, sessions, metricsStore)
 
 	mux := http.NewServeMux()
 
@@ -41,6 +50,9 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/api/models", dashboardHandler.HandleAPIModels)
 	mux.HandleFunc("/api/sessions", dashboardHandler.HandleAPISessions)
 	mux.HandleFunc("/api/sessions/clear", dashboardHandler.HandleAPIClearSessions)
+	mux.HandleFunc("/api/metrics/summary", dashboardHandler.HandleAPIMetricsSummary)
+	mux.HandleFunc("/api/metrics/daily", dashboardHandler.HandleAPIMetricsDaily)
+	mux.HandleFunc("/api/metrics/hourly", dashboardHandler.HandleAPIMetricsHourly)
 	mux.HandleFunc("/api/auth/copilot/device-code", dashboardHandler.HandleCopilotDeviceCode)
 	mux.HandleFunc("/api/auth/copilot/poll", dashboardHandler.HandleCopilotPoll)
 
@@ -98,6 +110,7 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 		engine:     engine,
 		catalog:    catalog,
 		sessions:   sessions,
+		metrics:    metricsStore,
 		httpServer: srv,
 	}
 }
@@ -108,6 +121,9 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.metrics != nil {
+		_ = s.metrics.Close()
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -121,6 +137,10 @@ func (s *Server) Catalog() *router.Catalog {
 
 func (s *Server) Sessions() *session.Manager {
 	return s.sessions
+}
+
+func (s *Server) Metrics() *metrics.Store {
+	return s.metrics
 }
 
 // loggingMiddleware logs HTTP request details.
@@ -156,8 +176,8 @@ func authMiddleware(requiredKey string, next http.Handler) http.Handler {
 			return
 		}
 
-		// Don't require key for root dashboard, health, catalog, or sessions
-		if r.URL.Path == "/" || r.URL.Path == "/api/status" || r.URL.Path == "/api/models" || r.URL.Path == "/api/sessions" || r.URL.Path == "/api/sessions/clear" {
+		// Don't require key for root dashboard, health, catalog, sessions, or metrics
+		if r.URL.Path == "/" || r.URL.Path == "/setup" || strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
