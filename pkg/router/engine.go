@@ -106,6 +106,26 @@ func (e *Engine) SyncProviderModels(providerName string, models []providers.Mode
 	e.SetProviderModels(providerName, ids)
 }
 
+// GetProviderModels returns the cached model IDs for a provider.
+func (e *Engine) GetProviderModels(providerName string) []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if e.providerModels == nil {
+		return nil
+	}
+	modelsMap := e.providerModels[providerName]
+	if modelsMap == nil {
+		return nil
+	}
+	res := make([]string, 0, len(modelsMap))
+	for m := range modelsMap {
+		res = append(res, m)
+	}
+	sort.Strings(res)
+	return res
+}
+
 func (e *Engine) providerHasModel(providerName, modelID string) bool {
 	if e.providerModels == nil {
 		return false

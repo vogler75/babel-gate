@@ -43,12 +43,20 @@ type DatabaseConfig struct {
 	RetentionDays int    `yaml:"retention_days"`  // Days to keep metrics, defaults to 90 (0 = keep forever)
 }
 
+// LoggingConfig defines settings for rotating log files.
+type LoggingConfig struct {
+	File       string `yaml:"file"`        // Path to log file, defaults to "logs/babelgate.log"
+	MaxSizeMB  int    `yaml:"max_size_mb"` // Max size per log file before rotation, defaults to 10
+	MaxBackups int    `yaml:"max_backups"` // Max number of rotated log files to retain, defaults to 5
+}
+
 // Config is the top-level configuration structure.
 type Config struct {
 	Server    ServerConfig              `yaml:"server"`
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	Routing   RoutingConfig             `yaml:"routing"`
 	Database  DatabaseConfig            `yaml:"database"`
+	Logging   LoggingConfig             `yaml:"logging"`
 }
 
 var envRegex = regexp.MustCompile(`\$\{([a-zA-Z_0-9]+)\}|\$([a-zA-Z_0-9]+)`)
@@ -107,6 +115,11 @@ func Load(path string) (*Config, error) {
 			Path:          "data/metrics.db",
 			RetentionDays: 90,
 		},
+		Logging: LoggingConfig{
+			File:       "logs/babelgate.log",
+			MaxSizeMB:  10,
+			MaxBackups: 5,
+		},
 	}
 
 	if path != "" {
@@ -146,6 +159,29 @@ func Load(path string) (*Config, error) {
 		if r, err := strconv.Atoi(retStr); err == nil && r >= 0 {
 			cfg.Database.RetentionDays = r
 		}
+	}
+
+	if logFile := os.Getenv("LOG_FILE"); logFile != "" {
+		cfg.Logging.File = logFile
+	}
+	if cfg.Logging.File == "" {
+		cfg.Logging.File = "logs/babelgate.log"
+	}
+	if logSizeStr := os.Getenv("LOG_MAX_SIZE_MB"); logSizeStr != "" {
+		if s, err := strconv.Atoi(logSizeStr); err == nil && s > 0 {
+			cfg.Logging.MaxSizeMB = s
+		}
+	}
+	if cfg.Logging.MaxSizeMB <= 0 {
+		cfg.Logging.MaxSizeMB = 10
+	}
+	if logBackupsStr := os.Getenv("LOG_MAX_BACKUPS"); logBackupsStr != "" {
+		if b, err := strconv.Atoi(logBackupsStr); err == nil && b >= 0 {
+			cfg.Logging.MaxBackups = b
+		}
+	}
+	if cfg.Logging.MaxBackups < 0 {
+		cfg.Logging.MaxBackups = 5
 	}
 
 	return cfg, nil

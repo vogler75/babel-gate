@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -143,12 +145,72 @@ func (s *Server) Metrics() *metrics.Store {
 	return s.metrics
 }
 
+func (s *Server) Config() *config.Config {
+	return s.cfg
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.status = code
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
 // loggingMiddleware logs HTTP request details.
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("[%s] %s %s took %v", r.Method, r.URL.Path, r.RemoteAddr, time.Since(start))
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+
+		clientName := session.DetectClient(r.Header.Get("x-client"), r.UserAgent())
+		sessID := inbound.ExtractSessionID(r)
+
+		var clientInfo []string
+		if clientName != "unknown" && clientName != "" {
+			clientInfo = append(clientInfo, "client: "+clientName)
+		}
+		if sessID != "" {
+			if len(sessID) > 12 {
+				clientInfo = append(clientInfo, "sess: "+sessID[:12]+"…")
+			} else {
+				clientInfo = append(clientInfo, "sess: "+sessID)
+			}
+		}
+
+		clientMeta := ""
+		if len(clientInfo) > 0 {
+			clientMeta = fmt.Sprintf(" (%s)", strings.Join(clientInfo, ", "))
+		}
+
+		log.Printf("[%s] %s -> %d %s%s took %v", r.Method, r.URL.Path, sw.status, r.RemoteAddr, clientMeta, time.Since(start))
 	})
 }
 

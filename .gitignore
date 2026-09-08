@@ -25,3 +25,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Logs
+logs/
+*.log

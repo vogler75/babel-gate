@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -697,6 +698,41 @@ func TestMetricsAPIEndToEnd(t *testing.T) {
 	handler.ServeHTTP(recHourly, reqHourly)
 	if recHourly.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK from /api/metrics/hourly, got %d", recHourly.Code)
+	}
+}
+
+func TestLoggingMiddleware(t *testing.T) {
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(origWriter)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("created"))
+	})
+
+	handler := loggingMiddleware(next)
+	req := httptest.NewRequest(http.MethodPost, "/test/path", nil)
+	req.Header.Set("x-client", "claude-code")
+	req.Header.Set("x-session-id", "test-session-123456789")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", rec.Code)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "[POST] /test/path -> 201") {
+		t.Errorf("expected log to contain method, path, and status code, got: %s", logged)
+	}
+	if !strings.Contains(logged, "client: claude-code") {
+		t.Errorf("expected log to contain client info, got: %s", logged)
+	}
+	if !strings.Contains(logged, "sess: test-session…") {
+		t.Errorf("expected log to contain truncated session ID, got: %s", logged)
 	}
 }
 
