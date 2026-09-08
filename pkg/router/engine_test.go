@@ -168,6 +168,82 @@ func TestCatalogList(t *testing.T) {
 	}
 }
 
+func TestCatalogOrder(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"copilot":   {Type: "copilot", Priority: 4},
+			"google":    {Type: "google", Priority: 1},
+			"anthropic": {Type: "anthropic", Priority: 2},
+		},
+		Routing: config.RoutingConfig{
+			Routes: map[string]string{
+				"z-alias": "google/gemini-2.5-flash",
+				"a-alias": "google/gemini-2.5-flash",
+			},
+		},
+	}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "copilot",
+		pType: "copilot",
+		models: []providers.ModelInfo{
+			{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash"},
+			{ID: "claude-opus-4.8", Name: "Claude Opus 4.8"},
+		},
+	})
+	engine.RegisterProvider(&mockProvider{
+		name:  "google",
+		pType: "google",
+		models: []providers.ModelInfo{
+			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
+			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
+		},
+	})
+	engine.RegisterProvider(&mockProvider{
+		name:  "anthropic",
+		pType: "anthropic",
+		models: []providers.ModelInfo{
+			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5"},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5"},
+		},
+	})
+
+	catalog := NewCatalog(engine)
+	models, err := catalog.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll failed: %v", err)
+	}
+
+	expectedIDs := []string{
+		// Google (prio 1), sorted alphabetically
+		"gemini-2.5-flash",
+		"gemini-2.5-pro",
+		// Anthropic (prio 2), sorted alphabetically
+		"claude-haiku-4-5",
+		"claude-sonnet-4-5",
+		// Copilot (prio 4), sorted alphabetically
+		"claude-opus-4.8",
+		"gemini-3.8-flash",
+		// Aliases (prio 999), sorted alphabetically
+		"a-alias",
+		"z-alias",
+	}
+
+	if len(models) != len(expectedIDs) {
+		t.Fatalf("expected %d models, got %d", len(expectedIDs), len(models))
+	}
+
+	for i, expected := range expectedIDs {
+		if models[i].ID != expected {
+			t.Errorf("at index %d: expected %q, got %q (provider: %s)", i, expected, models[i].ID, models[i].Provider)
+		}
+	}
+}
+
 func TestPriorityBasedModelResolution(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{

@@ -699,6 +699,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
     let allProviders = [];
     let allModels = [];
+    let priorityMap = {};
     const openDetails = new Set();
 
     function toggleDetails(sessionId) {
@@ -871,6 +872,16 @@ const dashboardHTML = `<!DOCTYPE html>
         return;
       }
 
+      filtered.sort((a, b) => {
+        const pA = priorityMap[a.provider] !== undefined ? priorityMap[a.provider] : (a.isAlias ? 999 : 100);
+        const pB = priorityMap[b.provider] !== undefined ? priorityMap[b.provider] : (b.isAlias ? 999 : 100);
+        if (pA !== pB) return pA - pB;
+        const provA = String(a.provider || '');
+        const provB = String(b.provider || '');
+        if (provA !== provB) return provA.localeCompare(provB);
+        return String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''));
+      });
+
       filtered.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.id;
@@ -891,6 +902,10 @@ const dashboardHTML = `<!DOCTYPE html>
         ]);
 
         allProviders = statusRes.providers || [];
+        priorityMap = {};
+        allProviders.forEach(p => {
+          priorityMap[p.name] = p.priority !== undefined ? p.priority : 100;
+        });
         allProviders.sort((a, b) => {
           const pA = a.priority !== undefined ? a.priority : 100;
           const pB = b.priority !== undefined ? b.priority : 100;
@@ -948,6 +963,16 @@ const dashboardHTML = `<!DOCTYPE html>
             ...m,
             id: cleanId
           });
+        });
+
+        displayedModels.sort((a, b) => {
+          const pA = priorityMap[a.provider] !== undefined ? priorityMap[a.provider] : (a.type === 'alias' ? 999 : 100);
+          const pB = priorityMap[b.provider] !== undefined ? priorityMap[b.provider] : (b.type === 'alias' ? 999 : 100);
+          if (pA !== pB) return pA - pB;
+          const provA = String(a.provider || '');
+          const provB = String(b.provider || '');
+          if (provA !== provB) return provA.localeCompare(provB);
+          return String(a.id || '').localeCompare(String(b.id || ''));
         });
 
         document.getElementById('modelCount').textContent = displayedModels.length;

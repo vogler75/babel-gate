@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,15 +25,31 @@ func NewCatalog(engine *Engine) *Catalog {
 	return &Catalog{engine: engine}
 }
 
-// ListAll returns all accessible models (native provider models + aliases).
+// ListAll returns all accessible models (native provider models + aliases),
+// ordered by provider priority ascending and then model ID.
 func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 	var results []CatalogModel
 	seen := make(map[string]bool)
 
 	providersMap := c.engine.GetProviders()
 
-	// 1. Query each active provider
-	for name, p := range providersMap {
+	// 1. Sort provider names by priority ascending so higher-priority providers take precedence
+	provNames := make([]string, 0, len(providersMap))
+	for name := range providersMap {
+		provNames = append(provNames, name)
+	}
+	sort.Slice(provNames, func(i, j int) bool {
+		pI := c.engine.GetProviderPriority(provNames[i])
+		pJ := c.engine.GetProviderPriority(provNames[j])
+		if pI != pJ {
+			return pI < pJ
+		}
+		return provNames[i] < provNames[j]
+	})
+
+	// 2. Query each active provider in priority order
+	for _, name := range provNames {
+		p := providersMap[name]
 		models, err := p.ListModels(ctx)
 		if err != nil {
 			// If upstream call fails, log or provide graceful fallback
@@ -54,9 +71,15 @@ func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 		}
 	}
 
-	// 2. Add configured aliases
+	// 3. Add configured aliases
 	routes := c.engine.GetRoutes()
-	for alias, target := range routes {
+	aliasNames := make([]string, 0, len(routes))
+	for alias := range routes {
+		aliasNames = append(aliasNames, alias)
+	}
+	sort.Strings(aliasNames)
+	for _, alias := range aliasNames {
+		target := routes[alias]
 		if !seen[alias] {
 			seen[alias] = true
 			results = append(results, CatalogModel{
@@ -69,6 +92,27 @@ func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 			})
 		}
 	}
+
+	// 4. Sort results by provider priority ascending, then provider name, then model name
+	sort.Slice(results, func(i, j int) bool {
+		pI := 999
+		if results[i].Type == "native" {
+			pI = c.engine.GetProviderPriority(results[i].Provider)
+		}
+		pJ := 999
+		if results[j].Type == "native" {
+			pJ = c.engine.GetProviderPriority(results[j].Provider)
+		}
+		if pI != pJ {
+			return pI < pJ
+		}
+		if results[i].Provider != results[j].Provider {
+			return results[i].Provider < results[j].Provider
+		}
+		nameI := strings.ToLower(results[i].ID)
+		nameJ := strings.ToLower(results[j].ID)
+		return nameI < nameJ
+	})
 
 	return results, nil
 }

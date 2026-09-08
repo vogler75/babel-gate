@@ -314,8 +314,8 @@ func findTokenInYAMLHosts(path string) string {
 // ResolveGitHubToken attempts to locate a GitHub / Copilot token from multiple sources:
 // 1. Explicit token argument
 // 2. COPILOT_API_KEY, GITHUB_TOKEN, GH_TOKEN env vars
-// 3. github-copilot apps.json (~/.config, %LOCALAPPDATA%, %APPDATA%)
-// 4. github-copilot hosts.json (~/.config, %LOCALAPPDATA%, %APPDATA%)
+// 3. github-copilot hosts.json (~/.config, %LOCALAPPDATA%, %APPDATA%, $XDG_CONFIG_HOME)
+// 4. github-copilot apps.json (~/.config, %LOCALAPPDATA%, %APPDATA%, $XDG_CONFIG_HOME)
 // 5. GitHub CLI hosts.yml (GH_CONFIG_DIR, %APPDATA%/GitHub CLI, %LOCALAPPDATA%/GitHub CLI, ~/.config/gh)
 func ResolveGitHubToken(explicitToken string) string {
 	if explicitToken != "" && !strings.HasPrefix(explicitToken, "${") {
@@ -333,25 +333,11 @@ func ResolveGitHubToken(explicitToken string) string {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 
-	// 1. Check github-copilot apps.json
-	var appsPaths []string
-	if home != "" {
-		appsPaths = append(appsPaths, filepath.Join(home, ".config", "github-copilot", "apps.json"))
-	}
-	if localAppData != "" {
-		appsPaths = append(appsPaths, filepath.Join(localAppData, "github-copilot", "apps.json"))
-	}
-	if appData != "" {
-		appsPaths = append(appsPaths, filepath.Join(appData, "github-copilot", "apps.json"))
-	}
-	for _, p := range appsPaths {
-		if token := findTokenInJSONApps(p); token != "" {
-			return token
-		}
-	}
-
-	// 2. Check github-copilot hosts.json
+	// 1. Check github-copilot hosts.json (official Copilot CLI / extension storage)
 	var hostsPaths []string
+	if xdgConfig != "" {
+		hostsPaths = append(hostsPaths, filepath.Join(xdgConfig, "github-copilot", "hosts.json"))
+	}
 	if home != "" {
 		hostsPaths = append(hostsPaths, filepath.Join(home, ".config", "github-copilot", "hosts.json"))
 	}
@@ -363,6 +349,26 @@ func ResolveGitHubToken(explicitToken string) string {
 	}
 	for _, p := range hostsPaths {
 		if token := findTokenInJSONHosts(p); token != "" {
+			return token
+		}
+	}
+
+	// 2. Check github-copilot apps.json
+	var appsPaths []string
+	if xdgConfig != "" {
+		appsPaths = append(appsPaths, filepath.Join(xdgConfig, "github-copilot", "apps.json"))
+	}
+	if home != "" {
+		appsPaths = append(appsPaths, filepath.Join(home, ".config", "github-copilot", "apps.json"))
+	}
+	if localAppData != "" {
+		appsPaths = append(appsPaths, filepath.Join(localAppData, "github-copilot", "apps.json"))
+	}
+	if appData != "" {
+		appsPaths = append(appsPaths, filepath.Join(appData, "github-copilot", "apps.json"))
+	}
+	for _, p := range appsPaths {
+		if token := findTokenInJSONApps(p); token != "" {
 			return token
 		}
 	}
