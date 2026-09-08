@@ -205,6 +205,18 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		rec.TotalTokens = rec.InputTokens + rec.OutputTokens
 	}
 
+	// Always ensure the model name is prefixed with the provider name for tracking and stats
+	if rec.Provider != "" && rec.Provider != "unknown" && rec.Model != "" {
+		prefix := rec.Provider + "/"
+		if !strings.HasPrefix(rec.Model, prefix) {
+			clean := rec.Model
+			if idx := strings.Index(clean, "/"); idx != -1 {
+				clean = clean[idx+1:]
+			}
+			rec.Model = prefix + clean
+		}
+	}
+
 	if m.metricsRecorder != nil {
 		isErr := rec.Status == "error"
 		_ = m.metricsRecorder.Record(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, isErr)

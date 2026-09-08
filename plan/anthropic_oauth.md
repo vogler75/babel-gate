@@ -21,7 +21,7 @@ Enable `llm-router` to authenticate with Anthropic using a **Claude Pro / Team /
 > [!NOTE]
 > Preferred login interaction methods supported:
 > 1. **Web Dashboard One-Click Login**: A "Connect Claude Subscription" button in the embedded web UI (`http://localhost:8080`) that opens your browser, listens for the OAuth callback, and saves credentials.
-> 2. **CLI Login Command**: A terminal command such as `./bin/llm-router auth login anthropic` that opens the browser or prints a login link with an authorization code prompt.
+> 2. **CLI Login Command**: A terminal command such as `./bin/babelgate auth login anthropic` that opens the browser or prints a login link with an authorization code prompt.
 > 3. **Automatic Claude Code Import**: If you already ran `claude login` with Claude Code, `llm-router` can automatically discover and import your existing credentials from your macOS environment.
 
 ---
@@ -116,8 +116,8 @@ Create a dedicated OAuth package to handle PKCE generation, browser launching, t
 
 #### [MODIFY] `cmd/router/main.go`
 - Add command-line support for authenticating directly in the terminal:
-  - `./bin/llm-router auth login anthropic`: Starts a temporary local HTTP server, opens the browser, captures the tokens, and exits with a confirmation.
-  - `./bin/llm-router auth status`: Shows current OAuth subscription connection details.
+  - `./bin/babelgate auth login anthropic`: Starts a temporary local HTTP server, opens the browser, captures the tokens, and exits with a confirmation.
+  - `./bin/babelgate auth status`: Shows current OAuth subscription connection details.
 
 ---
 
@@ -136,7 +136,7 @@ go test -v ./pkg/config/...
 
 ### Manual Verification
 1. **Initiate Browser Login**:
-   - Start the server: `./bin/llm-router`
+   - Start the server: `./bin/babelgate`
    - Open `http://localhost:8080` in the browser.
    - Click "Connect Claude Account".
    - Confirm Anthropic OAuth login page opens at `claude.ai`.

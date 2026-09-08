@@ -134,7 +134,7 @@ cd babel-gate
 go build -o bin\babelgate.exe .\cmd\router
 ```
 
-This generates the standalone binary in `./bin/babelgate` (`bin\babelgate.exe` on Windows, with `./bin/llm-router` symlinked on Unix).
+This generates the standalone binary in `./bin/babelgate` (`bin\babelgate.exe` on Windows).
 
 ### 2. Run with Zero-Config
 

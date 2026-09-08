@@ -69,7 +69,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 	sess := ResolveSession(h.sessions, r)
 	estInTokens := session.EstimateRequestTokens(canonReq)
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 
 	resp, err := h.engine.Execute(r.Context(), canonReq)
 	durationMs := time.Since(startTime).Milliseconds()
@@ -78,7 +78,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       false,
 				DurationMs:   durationMs,
 				InputTokens:  estInTokens,
@@ -102,7 +102,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       false,
 			DurationMs:   durationMs,
 			InputTokens:  inTokens,
@@ -150,7 +150,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 
 	sess := ResolveSession(h.sessions, r)
 	estInTokens := session.EstimateRequestTokens(canonReq)
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -165,7 +165,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       true,
 				DurationMs:   time.Since(startTime).Milliseconds(),
 				InputTokens:  estInTokens,
@@ -300,7 +300,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       true,
 			DurationMs:   time.Since(startTime).Milliseconds(),
 			InputTokens:  inTokens,

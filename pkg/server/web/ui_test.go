@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/metrics"
+	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
@@ -181,3 +184,91 @@ func findSubstr(s, substr string) bool {
 	}
 	return false
 }
+
+type mockProvider struct {
+	name   string
+	pType  string
+	models []providers.ModelInfo
+}
+
+func (m *mockProvider) Name() string { return m.name }
+func (m *mockProvider) Type() string { return m.pType }
+func (m *mockProvider) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
+	return nil, nil
+}
+func (m *mockProvider) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
+	return nil, nil
+}
+func (m *mockProvider) ListModels(ctx context.Context) ([]providers.ModelInfo, error) {
+	return m.models, nil
+}
+
+func TestDashboardHandler_APIModels_MultipleProviders(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"google":  {Type: "google", Priority: 1},
+			"copilot": {Type: "copilot", Priority: 2},
+		},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "google",
+		pType: "google",
+		models: []providers.ModelInfo{
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash"},
+		},
+	})
+	engine.RegisterProvider(&mockProvider{
+		name:  "copilot",
+		pType: "copilot",
+		models: []providers.ModelInfo{
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash (Copilot)"},
+		},
+	})
+
+	catalog := router.NewCatalog(engine)
+	handler := NewDashboardHandler(engine, catalog, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	w := httptest.NewRecorder()
+	handler.HandleAPIModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var res struct {
+		Models []router.CatalogModel `json:"models"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(res.Models) != 2 {
+		t.Fatalf("expected 2 models in /api/models, got %d: %+v", len(res.Models), res.Models)
+	}
+
+	hasGoogle := false
+	hasCopilot := false
+	for _, m := range res.Models {
+		if m.ID == "gemini-3.5-flash" {
+			if m.Provider == "google" {
+				hasGoogle = true
+			} else if m.Provider == "copilot" {
+				hasCopilot = true
+			}
+		}
+	}
+
+	if !hasGoogle {
+		t.Errorf("expected gemini-3.5-flash from google")
+	}
+	if !hasCopilot {
+		t.Errorf("expected gemini-3.5-flash from copilot")
+	}
+}
+

@@ -58,8 +58,9 @@ func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 		c.engine.SyncProviderModels(name, models)
 		for _, m := range models {
 			cleanID := strings.TrimPrefix(m.ID, name+"/")
-			if !seen[cleanID] {
-				seen[cleanID] = true
+			key := name + ":" + cleanID
+			if !seen[key] {
+				seen[key] = true
 				results = append(results, CatalogModel{
 					ID:          cleanID,
 					DisplayName: m.Name,
@@ -80,8 +81,9 @@ func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 	sort.Strings(aliasNames)
 	for _, alias := range aliasNames {
 		target := routes[alias]
-		if !seen[alias] {
-			seen[alias] = true
+		key := "router-alias:" + alias
+		if !seen[key] {
+			seen[key] = true
 			results = append(results, CatalogModel{
 				ID:          alias,
 				DisplayName: fmt.Sprintf("%s (alias -> %s)", alias, target),

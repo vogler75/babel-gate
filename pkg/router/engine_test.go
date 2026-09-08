@@ -325,3 +325,145 @@ func TestPriorityBasedModelResolution(t *testing.T) {
 		t.Fatalf("expected copilot-secondary (new Prio 1) to win, got %s", routeInverted.Provider.Name())
 	}
 }
+
+func TestCatalogDuplicateModelAcrossProviders(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"google":  {Type: "google", Priority: 1},
+			"copilot": {Type: "copilot", Priority: 2},
+		},
+		Routing: config.RoutingConfig{
+			Routes: map[string]string{
+				"gemini-3.5-flash": "copilot/gemini-3.5-flash",
+			},
+		},
+	}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "google",
+		pType: "google",
+		models: []providers.ModelInfo{
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash"},
+			// Duplicate within the same provider should be deduplicated
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash Duplicate"},
+		},
+	})
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "copilot",
+		pType: "copilot",
+		models: []providers.ModelInfo{
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash (Copilot)"},
+			{ID: "gpt-4o", Name: "GPT-4o"},
+		},
+	})
+
+	catalog := NewCatalog(engine)
+	models, err := catalog.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll failed: %v", err)
+	}
+
+	// Should contain:
+	// 1. Google gemini-3.5-flash (native, prio 1)
+	// 2. Copilot gemini-3.5-flash (native, prio 2)
+	// 3. Copilot gpt-4o (native, prio 2)
+	// 4. gemini-3.5-flash alias (alias, prio 999)
+	if len(models) != 4 {
+		t.Fatalf("expected 4 models in catalog, got %d: %+v", len(models), models)
+	}
+
+	var foundGoogle, foundCopilot, foundAlias bool
+	for _, m := range models {
+		if m.ID == "gemini-3.5-flash" {
+			switch m.Provider {
+			case "google":
+				foundGoogle = true
+			case "copilot":
+				foundCopilot = true
+			case "router-alias":
+				foundAlias = true
+			}
+		}
+	}
+
+	if !foundGoogle {
+		t.Errorf("expected gemini-3.5-flash for provider google in catalog")
+	}
+	if !foundCopilot {
+		t.Errorf("expected gemini-3.5-flash for provider copilot in catalog")
+	}
+	if !foundAlias {
+		t.Errorf("expected gemini-3.5-flash alias in catalog")
+	}
+}
+
+func TestResolveTrackingModel(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"google-primary": {Type: "google", Priority: 1},
+			"copilot-secondary": {Type: "copilot", Priority: 2},
+		},
+		Routing: config.RoutingConfig{
+			Routes: map[string]string{
+				"fast": "google-primary/gemini-2.5-flash",
+			},
+		},
+	}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "google-primary",
+		pType: "google",
+		models: []providers.ModelInfo{
+			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
+		},
+	})
+	engine.SyncProviderModels("google-primary", []providers.ModelInfo{{ID: "gemini-2.5-flash"}})
+
+	engine.RegisterProvider(&mockProvider{
+		name:  "copilot-secondary",
+		pType: "copilot",
+		models: []providers.ModelInfo{
+			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
+			{ID: "gpt-4o", Name: "GPT-4o"},
+		},
+	})
+	engine.SyncProviderModels("copilot-secondary", []providers.ModelInfo{
+		{ID: "gemini-2.5-flash"},
+		{ID: "gpt-4o"},
+	})
+
+	// 1. Request without provider: matches highest priority (google-primary)
+	prov1, track1 := engine.ResolveTrackingModel("gemini-2.5-flash")
+	if prov1 != "google-primary" || track1 != "google-primary/gemini-2.5-flash" {
+		t.Errorf("expected google-primary and google-primary/gemini-2.5-flash, got %q, %q", prov1, track1)
+	}
+
+	// 2. Request with explicit provider prefix
+	prov2, track2 := engine.ResolveTrackingModel("copilot-secondary/gemini-2.5-flash")
+	if prov2 != "copilot-secondary" || track2 != "copilot-secondary/gemini-2.5-flash" {
+		t.Errorf("expected copilot-secondary and copilot-secondary/gemini-2.5-flash, got %q, %q", prov2, track2)
+	}
+
+	// 3. Request unique model on secondary provider
+	prov3, track3 := engine.ResolveTrackingModel("gpt-4o")
+	if prov3 != "copilot-secondary" || track3 != "copilot-secondary/gpt-4o" {
+		t.Errorf("expected copilot-secondary and copilot-secondary/gpt-4o, got %q, %q", prov3, track3)
+	}
+
+	// 4. Request alias
+	prov4, track4 := engine.ResolveTrackingModel("fast")
+	if prov4 != "google-primary" || track4 != "google-primary/gemini-2.5-flash" {
+		t.Errorf("expected google-primary and google-primary/gemini-2.5-flash, got %q, %q", prov4, track4)
+	}
+}
+
+

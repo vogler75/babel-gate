@@ -229,8 +229,11 @@ func TestSessionManagerMetricsRecorder(t *testing.T) {
 		t.Fatalf("expected 1 record in recorder, got %d", len(rec.records))
 	}
 	r := rec.records[0]
-	if r.provider != "anthropic" || r.model != "claude-3-7-sonnet" || r.totalTokens != 300 || r.isError != false {
+	if r.provider != "anthropic" || r.model != "anthropic/claude-3-7-sonnet" || r.totalTokens != 300 || r.isError != false {
 		t.Errorf("unexpected record: %+v", r)
+	}
+	if len(s.Models) != 1 || s.Models[0] != "anthropic/claude-3-7-sonnet" {
+		t.Errorf("expected session model 'anthropic/claude-3-7-sonnet', got: %+v", s.Models)
 	}
 }
 

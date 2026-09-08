@@ -516,12 +516,13 @@ func TestSessionsAPIAndTokenTracking(t *testing.T) {
 			TotalTokens       int `json:"total_tokens"`
 		} `json:"summary"`
 		Sessions []struct {
-			ID           string `json:"id"`
-			Client       string `json:"client"`
-			RequestCount int    `json:"request_count"`
-			InputTokens  int    `json:"input_tokens"`
-			OutputTokens int    `json:"output_tokens"`
-			TotalTokens  int    `json:"total_tokens"`
+			ID           string   `json:"id"`
+			Client       string   `json:"client"`
+			RequestCount int      `json:"request_count"`
+			InputTokens  int      `json:"input_tokens"`
+			OutputTokens int      `json:"output_tokens"`
+			TotalTokens  int      `json:"total_tokens"`
+			Models       []string `json:"models"`
 		} `json:"sessions"`
 	}
 
@@ -543,6 +544,19 @@ func TestSessionsAPIAndTokenTracking(t *testing.T) {
 	}
 	if sessResp.Summary.TotalTokens != sessResp.Summary.TotalInputTokens+sessResp.Summary.TotalOutputTokens {
 		t.Errorf("total tokens mismatch: %d != %d + %d", sessResp.Summary.TotalTokens, sessResp.Summary.TotalInputTokens, sessResp.Summary.TotalOutputTokens)
+	}
+
+	for _, s := range sessResp.Sessions {
+		if s.ID == "sess_claude_123" {
+			if len(s.Models) == 0 || s.Models[0] != "google/gemini-2.5-pro" {
+				t.Errorf("expected 'google/gemini-2.5-pro' in claude session models, got: %+v", s.Models)
+			}
+		}
+		if s.ID == "sess_play_456" {
+			if len(s.Models) == 0 || s.Models[0] != "openai/gpt-4o" {
+				t.Errorf("expected 'openai/gpt-4o' in playground session models, got: %+v", s.Models)
+			}
+		}
 	}
 
 	// 5. Test Clear endpoint

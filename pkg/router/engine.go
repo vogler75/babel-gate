@@ -263,12 +263,26 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 	return nil, fmt.Errorf("unable to resolve model %q to any active provider", requestedModel)
 }
 
+// ResolveTrackingModel returns the resolved provider name and the provider-prefixed model name.
+// For example, if a model without a provider ("gemini-3.5-flash") resolves to provider "copilot",
+// it returns ("copilot", "copilot/gemini-3.5-flash").
+// If requestedModel already has a provider prefix matching the resolved provider, it is returned as-is.
+// If requestedModel is an alias (e.g. "fast" -> "google/gemini-2.5-flash"),
+// it returns ("google", "google/gemini-2.5-flash").
+func (e *Engine) ResolveTrackingModel(requestedModel string) (string, string) {
+	route, err := e.ResolveModel(requestedModel)
+	if err != nil || route.Provider == nil {
+		return "unknown", requestedModel
+	}
+	provName := route.Provider.Name()
+	cleanModel := strings.TrimPrefix(route.TargetModel, provName+"/")
+	return provName, provName + "/" + cleanModel
+}
+
 // ResolveProviderName returns the resolved provider name for a model, or "unknown" if unresolved.
 func (e *Engine) ResolveProviderName(model string) string {
-	if route, err := e.ResolveModel(model); err == nil && route.Provider != nil {
-		return route.Provider.Name()
-	}
-	return "unknown"
+	prov, _ := e.ResolveTrackingModel(model)
+	return prov
 }
 
 func (e *Engine) findProviderByType(pType string) providers.Provider {

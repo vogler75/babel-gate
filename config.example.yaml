@@ -44,7 +44,7 @@ providers:
   copilot:
     type: copilot
     # api_key is optional if authenticated via:
-    # 1. Device login: ./bin/llm-router -copilot-login
+    # 1. Device login: ./bin/babelgate -copilot-login
     # 2. Existing VS Code / JetBrains login in ~/.config/github-copilot/apps.json
     # 3. GITHUB_TOKEN or COPILOT_API_KEY env var
     # api_key: "${GITHUB_TOKEN}"

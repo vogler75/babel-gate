@@ -57,7 +57,7 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 }
 
 func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 	resp, err := h.engine.Execute(r.Context(), canonReq)
 	durationMs := time.Since(startTime).Milliseconds()
 	estInTokens := session.EstimateRequestTokens(canonReq)
@@ -66,7 +66,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       false,
 				DurationMs:   durationMs,
 				InputTokens:  estInTokens,
@@ -90,7 +90,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       false,
 			DurationMs:   durationMs,
 			InputTokens:  inTokens,
@@ -112,7 +112,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -127,7 +127,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       true,
 				DurationMs:   time.Since(startTime).Milliseconds(),
 				InputTokens:  estInTokens,
@@ -280,7 +280,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       true,
 			DurationMs:   time.Since(startTime).Milliseconds(),
 			InputTokens:  inTokens,

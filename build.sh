@@ -80,14 +80,8 @@ else
     go build -o bin/babelgate ./cmd/router
 fi
 
-# Create llm-router symlink for convenience
-(cd bin && ln -sf babelgate llm-router 2>/dev/null || true)
-
 BIN_SIZE=$(du -h bin/babelgate | awk '{print $1}')
 echo -e "${GREEN}✓ Successfully built bin/babelgate (${BIN_SIZE})${NC}"
-echo -e "${GREEN}✓ Created symlink bin/llm-router -> babelgate${NC}"
 echo ""
 echo "Run with:"
 echo "  ./bin/babelgate"
-echo "  # or"
-echo "  ./bin/llm-router"

@@ -218,9 +218,11 @@ func (h *AnthropicHandler) handlePassthrough(
 	upResp, err := anthClient.HTTPClient().Do(upReq)
 	if err != nil {
 		if sess != nil && h.sessions != nil {
+			prov := anthClient.Name()
+			trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     anthClient.Name(),
-				Model:        req.Model,
+				Provider:     prov,
+				Model:        trackingModel,
 				Stream:       req.Stream,
 				DurationMs:   time.Since(startTime).Milliseconds(),
 				Status:       "error",
@@ -329,9 +331,11 @@ func (h *AnthropicHandler) handlePassthrough(
 		status = "error"
 	}
 	if sess != nil && h.sessions != nil {
+		prov := anthClient.Name()
+		trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     anthClient.Name(),
-			Model:        req.Model,
+			Provider:     prov,
+			Model:        trackingModel,
 			Stream:       req.Stream,
 			DurationMs:   time.Since(startTime).Milliseconds(),
 			InputTokens:  inTokens,
@@ -343,7 +347,7 @@ func (h *AnthropicHandler) handlePassthrough(
 }
 
 func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 	resp, err := h.engine.Execute(r.Context(), canonReq)
 	durationMs := time.Since(startTime).Milliseconds()
 	estInTokens := session.EstimateRequestTokens(canonReq)
@@ -352,7 +356,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       false,
 				DurationMs:   durationMs,
 				InputTokens:  estInTokens,
@@ -376,7 +380,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       false,
 			DurationMs:   durationMs,
 			InputTokens:  inTokens,
@@ -398,7 +402,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 }
 
 func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
-	prov := h.engine.ResolveProviderName(canonReq.Model)
+	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -413,7 +417,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:     prov,
-				Model:        canonReq.Model,
+				Model:        trackingModel,
 				Stream:       true,
 				DurationMs:   time.Since(startTime).Milliseconds(),
 				InputTokens:  estInTokens,
@@ -613,7 +617,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 			Provider:     prov,
-			Model:        canonReq.Model,
+			Model:        trackingModel,
 			Stream:       true,
 			DurationMs:   time.Since(startTime).Milliseconds(),
 			InputTokens:  inTokens,

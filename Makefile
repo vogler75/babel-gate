@@ -5,7 +5,6 @@ all: build
 build:
 	@mkdir -p bin
 	go build -o bin/babelgate ./cmd/router
-	@ln -sf babelgate bin/llm-router 2>/dev/null || true
 
 test:
 	go test -v ./...

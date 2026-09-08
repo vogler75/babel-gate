@@ -368,6 +368,7 @@ const dashboardHTML = `<!DOCTYPE html>
     .card h2 { font-size: 1.15rem; color: var(--text-bright); margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; }
     .badge { background: var(--badge-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.75rem; color: #8b949e; }
     .pill { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+    .pill-copilot { background: #23863622; color: #3fb950; border: 1px solid #238636; }
     .pill-openai { background: #10a37f22; color: #10a37f; border: 1px solid #10a37f; }
     .pill-anthropic { background: #cc785c22; color: #cc785c; border: 1px solid #cc785c; }
     .pill-google { background: #1a73e822; color: #58a6ff; border: 1px solid #388bfd; }
@@ -677,6 +678,11 @@ const dashboardHTML = `<!DOCTYPE html>
     function getProviderPillClass(provider) {
       if (!provider) return 'pill-default';
       const p = String(provider).toLowerCase();
+      if (p.startsWith('copilot/') || p === 'copilot' || p.includes('github-copilot')) return 'pill-copilot';
+      if (p.startsWith('openai/') || p === 'openai') return 'pill-openai';
+      if (p.startsWith('anthropic/') || p === 'anthropic') return 'pill-anthropic';
+      if (p.startsWith('google/') || p === 'google') return 'pill-google';
+      if (p.includes('copilot')) return 'pill-copilot';
       if (p.includes('openai')) return 'pill-openai';
       if (p.includes('anthropic') || p.includes('claude')) return 'pill-anthropic';
       if (p.includes('google') || p.includes('gemini')) return 'pill-google';
@@ -856,7 +862,7 @@ const dashboardHTML = `<!DOCTYPE html>
         if (!seen.has(key)) {
           seen.add(key);
           filtered.push({
-            id: isAlias ? m.id : cleanName,
+            id: isAlias ? m.id : (m.provider && m.provider !== 'router-alias' ? m.provider + '/' + cleanName : cleanName),
             name: cleanName,
             provider: m.provider,
             isAlias: isAlias
@@ -1859,7 +1865,7 @@ print(response.text)</code></pre>
       <div class="step-title">Option B: CLI Device Registration</div>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        <pre><code class="lang-sh">./bin/llm-router -copilot-login</code></pre>
+        <pre><code class="lang-sh">./bin/babelgate -copilot-login</code></pre>
       </div>
 
       <div class="step-title">Option C: Configuration in config.yaml</div>
