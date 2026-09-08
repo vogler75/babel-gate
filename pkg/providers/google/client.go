@@ -163,8 +163,20 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	go func() {
 		defer resp.Body.Close()
 		defer close(eventChan)
+		stop := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
+		defer stop()
+		send := func(ev canonical.CanonicalEvent) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case eventChan <- ev:
+				return true
+			}
+		}
 
+		nextToolIndex := map[int]int{}
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -175,13 +187,22 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 				dataStr := strings.TrimPrefix(line, "data: ")
 				events, err := ParseGoogleStreamEvent([]byte(dataStr), targetModel)
 				if err != nil {
-					continue
+					send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
+					return
 				}
 
+				indexes := map[[2]int]int{}
 				for _, ev := range events {
+					key := [2]int{ev.CandidateIndex, ev.Index}
+					if ev.Type == canonical.EventToolCallStart {
+						indexes[key] = nextToolIndex[ev.CandidateIndex]
+						nextToolIndex[ev.CandidateIndex]++
+					}
+					if ev.Type == canonical.EventToolCallStart || ev.Type == canonical.EventToolCallDelta || ev.Type == canonical.EventToolCallDone {
+						ev.Index = indexes[key]
+					}
 					select {
 					case <-ctx.Done():
-						eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: ctx.Err()}
 						return
 					case eventChan <- ev:
 					}
@@ -190,9 +211,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		}
 
 		if err := scanner.Err(); err != nil && err != io.EOF {
-			eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: err}
+			send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
 		} else {
-			eventChan <- canonical.CanonicalEvent{Type: canonical.EventMessageDone}
+			send(canonical.CanonicalEvent{Type: canonical.EventMessageDone})
 		}
 	}()
 

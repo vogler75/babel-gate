@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -56,6 +55,8 @@ func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
 }
 
 func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = false
 	openAIReq, err := ToOpenAIRequest(req)
 	if err != nil {
@@ -98,10 +99,12 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 		return nil, fmt.Errorf("unmarshal openai response: %w", err)
 	}
 
-	return FromOpenAIResponse(&openAIResp)
+	return openAIReq.RestoreResponse(FromOpenAIResponse(&openAIResp))
 }
 
 func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = true
 	openAIReq, err := ToOpenAIRequest(req)
 	if err != nil {
@@ -136,49 +139,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		return nil, fmt.Errorf("openai stream api error %d: %s", resp.StatusCode, string(body))
 	}
 
-	eventChan := make(chan canonical.CanonicalEvent, 64)
+	eventChan := ReadStream(ctx, resp.Body)
 
-	go func() {
-		defer resp.Body.Close()
-		defer close(eventChan)
-
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-
-			if strings.HasPrefix(line, "data: ") {
-				data := strings.TrimPrefix(line, "data: ")
-				if data == "[DONE]" {
-					eventChan <- canonical.CanonicalEvent{Type: canonical.EventMessageDone}
-					return
-				}
-
-				chunk, err := UnmarshalStreamChunk([]byte(data))
-				if err != nil {
-					continue
-				}
-
-				events := ParseOpenAIStreamEvent(chunk)
-				for _, ev := range events {
-					select {
-					case <-ctx.Done():
-						eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: ctx.Err()}
-						return
-					case eventChan <- ev:
-					}
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil && err != io.EOF {
-			eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: err}
-		}
-	}()
-
-	return eventChan, nil
+	return openAIReq.RestoreStream(ctx, eventChan), nil
 }
 
 func (c *Client) ListModels(ctx context.Context) ([]providers.ModelInfo, error) {

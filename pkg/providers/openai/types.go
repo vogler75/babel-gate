@@ -1,10 +1,12 @@
 package openai
 
+import "github.com/vogler75/babel-gate/pkg/providers/toolnames"
+
 type ChatMessage struct {
-	Role       string            `json:"role"`
-	Content    any               `json:"content,omitempty"`
-	ToolCalls  []ToolCall        `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {
@@ -41,16 +43,18 @@ type FunctionDefinition struct {
 }
 
 type ChatCompletionRequest struct {
-	Model         string            `json:"model"`
-	Messages      []ChatMessage     `json:"messages"`
-	Tools         []ToolDefinition  `json:"tools,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	TopP          *float64          `json:"top_p,omitempty"`
-	MaxTokens           *int              `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"`
-	Stop                []string          `json:"stop,omitempty"`
-	Stream              bool              `json:"stream,omitempty"`
-	StreamOptions       *StreamOptions    `json:"stream_options,omitempty"`
+	names               *toolnames.Mapping
+	ToolChoice          any              `json:"tool_choice,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []ChatMessage    `json:"messages"`
+	Tools               []ToolDefinition `json:"tools,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	TopP                *float64         `json:"top_p,omitempty"`
+	MaxTokens           *int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int             `json:"max_completion_tokens,omitempty"`
+	Stop                []string         `json:"stop,omitempty"`
+	Stream              bool             `json:"stream,omitempty"`
+	StreamOptions       *StreamOptions   `json:"stream_options,omitempty"`
 }
 
 type StreamOptions struct {
@@ -90,9 +94,11 @@ type StreamChoice struct {
 }
 
 type StreamDelta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Reasoning        string     `json:"reasoning,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ModelListResponse struct {

@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -153,7 +154,9 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		return
 	}
 
-	eventsChan, err := h.engine.Stream(r.Context(), canonReq)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
@@ -181,7 +184,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	streamStatus := "success"
 	var streamErr string
 
-	for ev := range eventsChan {
+	for ev := range completeToolStream(ctx, eventsChan) {
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
 			if ev.Error != nil {
@@ -190,7 +193,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			errData := map[string]any{
 				"error": map[string]any{
 					"code":    500,
-					"message": ev.Error.Error(),
+					"message": streamErr,
 					"status":  "INTERNAL",
 				},
 			}
@@ -200,6 +203,13 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			return
 		}
 
+		if ev.Type == canonical.EventThinkingDelta && ev.Thinking != "" {
+			totalChars += len(ev.Thinking)
+			chunk := map[string]any{"candidates": []any{map[string]any{"index": ev.CandidateIndex, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": ev.Thinking, "thought": true}}}}}}
+			b, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			flusher.Flush()
+		}
 		if ev.Type == canonical.EventTextDelta && ev.Text != "" {
 			totalChars += len(ev.Text)
 			chunk := map[string]any{
@@ -211,7 +221,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 								{"text": ev.Text},
 							},
 						},
-						"index": ev.Index,
+						"index": ev.CandidateIndex,
 					},
 				},
 			}
@@ -220,7 +230,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			flusher.Flush()
 		}
 
-		if ev.Type == canonical.EventToolCallStart {
+		if ev.Type == canonical.EventToolCallDone {
 			chunk := map[string]any{
 				"candidates": []map[string]any{
 					{
@@ -228,14 +238,16 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 							"role": "model",
 							"parts": []map[string]any{
 								{
+									"thoughtSignature": ev.ThoughtSignature,
 									"functionCall": map[string]any{
+										"id":   ev.ToolCallID,
 										"name": ev.ToolCallName,
-										"args": map[string]any{},
+										"args": json.RawMessage(ev.ToolCallArgs),
 									},
 								},
 							},
 						},
-						"index": ev.Index,
+						"index": ev.CandidateIndex,
 					},
 				},
 			}
@@ -262,7 +274,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 					"candidates": []map[string]any{
 						{
 							"finishReason": reason,
-							"index":        ev.Index,
+							"index":        ev.CandidateIndex,
 						},
 					},
 				}

@@ -1,8 +1,10 @@
 package openai
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"github.com/vogler75/babel-gate/pkg/providers/toolnames"
 	"strings"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -10,7 +12,10 @@ import (
 
 // ToOpenAIRequest converts a CanonicalRequest into an OpenAI ChatCompletionRequest.
 func ToOpenAIRequest(req *canonical.CanonicalRequest) (*ChatCompletionRequest, error) {
+	req, names := toolnames.Normalize(req, toolnames.Constraints{MaxLength: 64, Allowed: toolnames.ASCII})
 	out := &ChatCompletionRequest{
+		ToolChoice:  toolnames.WireChoice(req.ToolChoice, false),
+		names:       names,
 		Model:       req.Model,
 		Temperature: req.Params.Temperature,
 		TopP:        req.Params.TopP,
@@ -208,6 +213,7 @@ func ParseOpenAIStreamEvent(chunk *StreamChunk) []canonical.CanonicalEvent {
 	}
 
 	for _, choice := range chunk.Choices {
+		firstEvent := len(events)
 		if choice.Delta.Role != "" {
 			events = append(events, canonical.CanonicalEvent{
 				Type:      canonical.EventMessageStart,
@@ -216,6 +222,14 @@ func ParseOpenAIStreamEvent(chunk *StreamChunk) []canonical.CanonicalEvent {
 			})
 		}
 
+		// Prefer reasoning_content when both compatible-provider aliases occur.
+		thinking := choice.Delta.ReasoningContent
+		if thinking == "" {
+			thinking = choice.Delta.Reasoning
+		}
+		if thinking != "" {
+			events = append(events, canonical.CanonicalEvent{Type: canonical.EventThinkingDelta, MessageID: chunk.ID, Thinking: thinking})
+		}
 		if choice.Delta.Content != "" {
 			events = append(events, canonical.CanonicalEvent{
 				Type:      canonical.EventTextDelta,
@@ -258,6 +272,9 @@ func ParseOpenAIStreamEvent(chunk *StreamChunk) []canonical.CanonicalEvent {
 				FinishReason: choice.FinishReason,
 			})
 		}
+		for i := firstEvent; i < len(events); i++ {
+			events[i].CandidateIndex = choice.Index
+		}
 	}
 
 	return events
@@ -265,18 +282,47 @@ func ParseOpenAIStreamEvent(chunk *StreamChunk) []canonical.CanonicalEvent {
 
 // Helper to unmarshal raw line
 func UnmarshalStreamChunk(data []byte) (*StreamChunk, error) {
+	var envelope struct {
+		// Azure-compatible gateways can emit prompt-filter metadata before choices.
+		PromptFilterResults []json.RawMessage `json:"prompt_filter_results"`
+		PromptAnnotations   []json.RawMessage `json:"prompt_annotations"`
+
+		Error   json.RawMessage `json:"error"`
+		Choices []struct {
+			Delta json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("invalid completion chunk: %w", err)
+	}
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		return nil, fmt.Errorf("upstream stream error: %s", envelope.Error)
+	}
 	var chunk StreamChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return nil, err
+	}
+	if len(chunk.Choices) == 0 && chunk.Usage == nil && len(envelope.PromptFilterResults) == 0 && len(envelope.PromptAnnotations) == 0 {
+		return nil, fmt.Errorf("completion chunk has neither choices nor usage")
+	}
+	for _, choice := range envelope.Choices {
+		if len(choice.Delta) == 0 || choice.Delta[0] != '{' {
+			return nil, fmt.Errorf("completion choice has no delta object")
+		}
 	}
 	return &chunk, nil
 }
 
 // FromOpenAIRequest converts an incoming OpenAI ChatCompletionRequest into a CanonicalRequest.
 func FromOpenAIRequest(req *ChatCompletionRequest) (*canonical.CanonicalRequest, error) {
+	choice, err := toolnames.ParseChoice(req.ToolChoice, false)
+	if err != nil {
+		return nil, err
+	}
 	out := &canonical.CanonicalRequest{
-		Model:  req.Model,
-		Stream: req.Stream,
+		ToolChoice: choice,
+		Model:      req.Model,
+		Stream:     req.Stream,
 		Params: canonical.Parameters{
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
@@ -380,7 +426,7 @@ func FromOpenAIRequest(req *ChatCompletionRequest) (*canonical.CanonicalRequest,
 func ToOpenAIResponse(resp *canonical.CanonicalResponse) (*ChatCompletionResponse, error) {
 	id := resp.ID
 	if id == "" {
-		id = fmt.Sprintf("chatcmpl-%d", timeNowUnixMilli())
+		id = "chatcmpl-" + rand.Text()
 	}
 
 	finishReason := resp.FinishReason
@@ -441,8 +487,3 @@ func ToOpenAIResponse(resp *canonical.CanonicalResponse) (*ChatCompletionRespons
 
 	return out, nil
 }
-
-func timeNowUnixMilli() int64 {
-	return 1700000000000
-}
-

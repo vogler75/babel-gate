@@ -1,18 +1,22 @@
 package anthropic
 
+import "github.com/vogler75/babel-gate/pkg/providers/toolnames"
+
 import "encoding/json"
 
 type MessageRequest struct {
-	Model       string          `json:"model"`
-	Messages    []Message       `json:"messages"`
-	System      any             `json:"system,omitempty"` // string or []SystemPart
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	TopK        *int            `json:"top_k,omitempty"`
-	StopSequences []string      `json:"stop_sequences,omitempty"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	names         *toolnames.Mapping
+	ToolChoice    any              `json:"tool_choice,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []Message        `json:"messages"`
+	System        any              `json:"system,omitempty"` // string or []SystemPart
+	MaxTokens     int              `json:"max_tokens"`
+	Temperature   *float64         `json:"temperature,omitempty"`
+	TopP          *float64         `json:"top_p,omitempty"`
+	TopK          *int             `json:"top_k,omitempty"`
+	StopSequences []string         `json:"stop_sequences,omitempty"`
+	Tools         []ToolDefinition `json:"tools,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
 }
 
 type Message struct {
@@ -115,10 +119,10 @@ type MessageInfo struct {
 }
 
 type StreamDelta struct {
-	Type         string `json:"type,omitempty"`
-	Text         string `json:"text,omitempty"`
-	Thinking     string `json:"thinking,omitempty"`
-	Signature    string `json:"signature,omitempty"`
-	PartialJSON  string `json:"partial_json,omitempty"`
-	StopReason   string `json:"stop_reason,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
 }

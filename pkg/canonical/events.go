@@ -4,15 +4,15 @@ package canonical
 type EventType string
 
 const (
-	EventMessageStart   EventType = "message_start"
-	EventThinkingDelta  EventType = "thinking_delta"
-	EventTextDelta      EventType = "text_delta"
-	EventToolCallStart  EventType = "tool_call_start"
-	EventToolCallDelta  EventType = "tool_call_delta"
-	EventToolCallDone   EventType = "tool_call_done"
-	EventMessageDelta   EventType = "message_delta"
-	EventMessageDone    EventType = "message_done"
-	EventError          EventType = "error"
+	EventMessageStart  EventType = "message_start"
+	EventThinkingDelta EventType = "thinking_delta"
+	EventTextDelta     EventType = "text_delta"
+	EventToolCallStart EventType = "tool_call_start"
+	EventToolCallDelta EventType = "tool_call_delta"
+	EventToolCallDone  EventType = "tool_call_done"
+	EventMessageDelta  EventType = "message_delta"
+	EventMessageDone   EventType = "message_done"
+	EventError         EventType = "error"
 )
 
 // CanonicalEvent represents a normalized streaming chunk.
@@ -23,10 +23,13 @@ type CanonicalEvent struct {
 	MessageID string `json:"message_id,omitempty"`
 	Model     string `json:"model,omitempty"`
 
+	// CandidateIndex identifies a response choice independently of its content/tool Index.
+	CandidateIndex int `json:"candidate_index,omitempty"`
+
 	// Content blocks
-	Index        int    `json:"index,omitempty"`
-	Text         string `json:"text,omitempty"`
-	Thinking     string `json:"thinking,omitempty"`
+	Index            int    `json:"index,omitempty"`
+	Text             string `json:"text,omitempty"`
+	Thinking         string `json:"thinking,omitempty"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
 	ToolCallName     string `json:"tool_call_name,omitempty"`
 	ToolCallArgs     string `json:"tool_call_args,omitempty"` // incremental delta for args

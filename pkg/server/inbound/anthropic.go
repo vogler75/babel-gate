@@ -3,6 +3,7 @@ package inbound
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -179,6 +180,11 @@ func (h *AnthropicHandler) handlePassthrough(
 	apiKey := anthClient.ResolveAPIKey(clientToken)
 
 	upstreamBody := sanitizeAnthropicPayload(bodyBytes, targetModel, req.Model)
+	upstreamBody, names, err := anthropic.NormalizePayload(upstreamBody)
+	if err != nil {
+		http.Error(w, "invalid tool names payload", http.StatusBadRequest)
+		return
+	}
 
 	targetURL := anthClient.BaseURL() + "/messages"
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(upstreamBody))
@@ -226,6 +232,9 @@ func (h *AnthropicHandler) handlePassthrough(
 	defer upResp.Body.Close()
 
 	for k, vv := range upResp.Header {
+		if names.Changed() && strings.EqualFold(k, "Content-Length") {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
@@ -242,7 +251,14 @@ func (h *AnthropicHandler) handlePassthrough(
 		for {
 			line, rErr := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				_, _ = w.Write(line)
+				if names.Changed() && bytes.HasPrefix(line, []byte("data:")) {
+					payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+					line = append([]byte("data: "), anthropic.RestorePayload(payload, names)...)
+					line = append(line, '\n')
+				}
+				if _, err := w.Write(line); err != nil {
+					return
+				}
 				if isFlusher {
 					flusher.Flush()
 				}
@@ -286,6 +302,7 @@ func (h *AnthropicHandler) handlePassthrough(
 		}
 	} else {
 		respBytes, _ := io.ReadAll(upResp.Body)
+		respBytes = anthropic.RestorePayload(respBytes, names)
 		if len(respBytes) > 0 {
 			_, _ = w.Write(respBytes)
 			var nonStreamResp struct {
@@ -383,7 +400,9 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	}
 
 	estInTokens := session.EstimateRequestTokens(canonReq)
-	eventsChan, err := h.engine.Stream(r.Context(), canonReq)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
@@ -452,7 +471,11 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	for ev := range eventsChan {
+	for ev := range completeToolStream(ctx, eventsChan) {
+		if ev.CandidateIndex != 0 {
+			sendSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": "Anthropic output supports only candidate zero"}})
+			return
+		}
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
 			if ev.Error != nil {
@@ -462,7 +485,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				"type": "error",
 				"error": map[string]any{
 					"type":    "api_error",
-					"message": ev.Error.Error(),
+					"message": streamErr,
 				},
 			})
 			return
@@ -520,49 +543,17 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				},
 			})
 
-		case canonical.EventToolCallStart:
-			closeActiveBlock()
-			activeBlockType = "tool_use"
-			stopReason = "tool_use"
-			sendSSE("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": currentBlockIndex,
-				"content_block": map[string]any{
-					"type":  "tool_use",
-					"id":    ev.ToolCallID,
-					"name":  ev.ToolCallName,
-					"input": map[string]any{},
-				},
-			})
-
-		case canonical.EventToolCallDelta:
-			totalTextChars += len(ev.ToolCallArgs)
-			if activeBlockType != "tool_use" {
-				closeActiveBlock()
-				activeBlockType = "tool_use"
-				stopReason = "tool_use"
-				sendSSE("content_block_start", map[string]any{
-					"type":  "content_block_start",
-					"index": currentBlockIndex,
-					"content_block": map[string]any{
-						"type":  "tool_use",
-						"id":    ev.ToolCallID,
-						"name":  ev.ToolCallName,
-						"input": map[string]any{},
-					},
-				})
-			}
-			sendSSE("content_block_delta", map[string]any{
-				"type":  "content_block_delta",
-				"index": currentBlockIndex,
-				"delta": map[string]any{
-					"type":         "input_json_delta",
-					"partial_json": ev.ToolCallArgs,
-				},
-			})
-
 		case canonical.EventToolCallDone:
 			closeActiveBlock()
+			stopReason = "tool_use"
+			sendSSE("content_block_start", map[string]any{
+				"type": "content_block_start", "index": currentBlockIndex,
+				"content_block": map[string]any{"type": "tool_use", "id": ev.ToolCallID, "name": ev.ToolCallName, "input": map[string]any{}},
+			})
+			totalTextChars += len(ev.ToolCallArgs)
+			sendSSE("content_block_delta", map[string]any{"type": "content_block_delta", "index": currentBlockIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": ev.ToolCallArgs}})
+			sendSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": currentBlockIndex})
+			currentBlockIndex++
 
 		case canonical.EventMessageDelta:
 			if ev.FinishReason != "" {

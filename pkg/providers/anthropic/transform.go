@@ -2,18 +2,22 @@ package anthropic
 
 import (
 	"encoding/json"
+	"github.com/vogler75/babel-gate/pkg/providers/toolnames"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
 
 // ToAnthropicRequest converts a CanonicalRequest into an Anthropic MessageRequest.
 func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error) {
+	req, names := toolnames.Normalize(req, toolnames.Constraints{MaxLength: 64, Allowed: toolnames.ASCII})
 	maxTokens := 4096
 	if req.Params.MaxTokens != nil && *req.Params.MaxTokens > 0 {
 		maxTokens = *req.Params.MaxTokens
 	}
 
 	out := &MessageRequest{
+		ToolChoice:    toolnames.WireChoice(req.ToolChoice, true),
+		names:         names,
 		Model:         req.Model,
 		MaxTokens:     maxTokens,
 		Temperature:   req.Params.Temperature,
@@ -96,10 +100,10 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 
 			case canonical.PartToolResult:
 				blocks = append(blocks, ContentBlock{
-					Type:       "tool_result",
-					ToolUseID:  p.ToolResultID,
-					Content:    p.ToolResultContent,
-					IsError:    p.ToolResultError,
+					Type:      "tool_result",
+					ToolUseID: p.ToolResultID,
+					Content:   p.ToolResultContent,
+					IsError:   p.ToolResultError,
 				})
 			}
 		}
@@ -280,9 +284,14 @@ func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) 
 
 // FromAnthropicRequest converts an incoming Anthropic MessageRequest into a CanonicalRequest.
 func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, error) {
+	choice, err := toolnames.ParseChoice(req.ToolChoice, true)
+	if err != nil {
+		return nil, err
+	}
 	out := &canonical.CanonicalRequest{
-		Model:  req.Model,
-		Stream: req.Stream,
+		ToolChoice: choice,
+		Model:      req.Model,
+		Stream:     req.Stream,
 		Params: canonical.Parameters{
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
@@ -502,4 +511,3 @@ func ToAnthropicResponse(resp *canonical.CanonicalResponse) (*MessageResponse, e
 		},
 	}, nil
 }
-

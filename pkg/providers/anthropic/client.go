@@ -77,6 +77,8 @@ func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
 }
 
 func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = false
 	anthropicReq, err := ToAnthropicRequest(req)
 	if err != nil {
@@ -121,10 +123,12 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 		return nil, fmt.Errorf("unmarshal anthropic response: %w", err)
 	}
 
-	return FromAnthropicResponse(&anthropicResp)
+	return anthropicReq.RestoreResponse(FromAnthropicResponse(&anthropicResp))
 }
 
 func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = true
 	anthropicReq, err := ToAnthropicRequest(req)
 	if err != nil {
@@ -166,8 +170,19 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	go func() {
 		defer resp.Body.Close()
 		defer close(eventChan)
+		stop := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
+		defer stop()
+		send := func(ev canonical.CanonicalEvent) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case eventChan <- ev:
+				return true
+			}
+		}
 
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 		var currentEvent string
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -179,12 +194,12 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 				dataStr := strings.TrimPrefix(line, "data: ")
 				events, err := ParseAnthropicStreamEvent([]byte(dataStr))
 				if err != nil {
-					continue
+					send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
+					return
 				}
 				for _, ev := range events {
 					select {
 					case <-ctx.Done():
-						eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: ctx.Err()}
 						return
 					case eventChan <- ev:
 					}
@@ -194,11 +209,11 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		}
 
 		if err := scanner.Err(); err != nil && err != io.EOF {
-			eventChan <- canonical.CanonicalEvent{Type: canonical.EventError, Error: err}
+			send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
 		}
 	}()
 
-	return eventChan, nil
+	return anthropicReq.RestoreStream(ctx, eventChan), nil
 }
 
 func (c *Client) ListModels(ctx context.Context) ([]providers.ModelInfo, error) {

@@ -1,7 +1,6 @@
 package copilot
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -140,6 +139,8 @@ func (c *Client) setCopilotHeaders(req *http.Request, token string) {
 
 // Execute executes a non-streaming canonical request against GitHub Copilot.
 func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = false
 	token, baseURL, err := c.ensureSessionToken(ctx, req.AuthToken)
 	if err != nil {
@@ -183,11 +184,13 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 		return nil, fmt.Errorf("unmarshal copilot response: %w", err)
 	}
 
-	return openai.FromOpenAIResponse(&openAIResp)
+	return openAIReq.RestoreResponse(openai.FromOpenAIResponse(&openAIResp))
 }
 
 // Stream executes a streaming canonical request against GitHub Copilot.
 func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
+	requestCopy := *req
+	req = &requestCopy
 	req.Stream = true
 	token, baseURL, err := c.ensureSessionToken(ctx, req.AuthToken)
 	if err != nil {
@@ -223,49 +226,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		return nil, fmt.Errorf("copilot stream api error status %d: %s", resp.StatusCode, string(errBytes))
 	}
 
-	outCh := make(chan canonical.CanonicalEvent, 64)
+	outCh := openai.ReadStream(ctx, resp.Body)
 
-	go func() {
-		defer resp.Body.Close()
-		defer close(outCh)
-
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-
-			if strings.HasPrefix(line, "data:") {
-				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-				if data == "[DONE]" {
-					outCh <- canonical.CanonicalEvent{Type: canonical.EventMessageDone}
-					return
-				}
-
-				chunk, err := openai.UnmarshalStreamChunk([]byte(data))
-				if err != nil {
-					continue
-				}
-
-				events := openai.ParseOpenAIStreamEvent(chunk)
-				for _, ev := range events {
-					select {
-					case <-ctx.Done():
-						outCh <- canonical.CanonicalEvent{Type: canonical.EventError, Error: ctx.Err()}
-						return
-					case outCh <- ev:
-					}
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil && err != io.EOF {
-			outCh <- canonical.CanonicalEvent{Type: canonical.EventError, Error: err}
-		}
-	}()
-
-	return outCh, nil
+	return openAIReq.RestoreStream(ctx, outCh), nil
 }
 
 // ListModels queries GitHub Copilot's /models endpoint and returns available chat models.

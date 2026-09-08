@@ -79,14 +79,21 @@ type Parameters struct {
 	Stop        []string `json:"stop,omitempty"`
 }
 
+// ToolChoice selects automatic, required, disabled, or a named function.
+type ToolChoice struct {
+	Mode string `json:"mode"`
+	Name string `json:"name,omitempty"`
+}
+
 // CanonicalRequest is the normalized request passed into the routing and provider layers.
 type CanonicalRequest struct {
-	Model     string            `json:"model"`
-	Messages  []Message         `json:"messages"`
-	Tools     []ToolDeclaration `json:"tools,omitempty"`
-	Params    Parameters        `json:"params,omitempty"`
-	Stream    bool              `json:"stream,omitempty"`
-	AuthToken string            `json:"auth_token,omitempty"`
+	ToolChoice *ToolChoice       `json:"tool_choice,omitempty"`
+	Model      string            `json:"model"`
+	Messages   []Message         `json:"messages"`
+	Tools      []ToolDeclaration `json:"tools,omitempty"`
+	Params     Parameters        `json:"params,omitempty"`
+	Stream     bool              `json:"stream,omitempty"`
+	AuthToken  string            `json:"auth_token,omitempty"`
 }
 
 // SystemPrompt extracts and concatenates any leading or internal system messages.
@@ -123,9 +130,9 @@ type Usage struct {
 
 // CanonicalResponse is the normalized response returned by providers for non-streaming requests.
 type CanonicalResponse struct {
-	ID           string   `json:"id"`
-	Model        string   `json:"model"`
-	Message      Message  `json:"message"`
-	FinishReason string   `json:"finish_reason"` // "stop", "tool_calls", "length", etc.
-	Usage        Usage    `json:"usage"`
+	ID           string  `json:"id"`
+	Model        string  `json:"model"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"` // "stop", "tool_calls", "length", etc.
+	Usage        Usage   `json:"usage"`
 }

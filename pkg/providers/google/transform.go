@@ -1,6 +1,7 @@
 package google
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -525,6 +526,7 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 	}
 
 	for _, cand := range resp.Candidates {
+		firstEvent := len(events)
 		latestSignature := ""
 		for i, part := range cand.Content.Parts {
 			if part.ThoughtSignature != "" {
@@ -553,7 +555,7 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 
 				callID := part.FunctionCall.ID
 				if callID == "" {
-					callID = fmt.Sprintf("call_%s_%d", sanitizeToolID(part.FunctionCall.Name), i)
+					callID = "call_" + rand.Text()
 				}
 
 				sig := part.ThoughtSignature
@@ -566,7 +568,7 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 
 				events = append(events, canonical.CanonicalEvent{
 					Type:             canonical.EventToolCallStart,
-					Index:            cand.Index,
+					Index:            i,
 					ToolCallID:       callID,
 					ToolCallName:     part.FunctionCall.Name,
 					ThoughtSignature: sig,
@@ -574,7 +576,7 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 				})
 				events = append(events, canonical.CanonicalEvent{
 					Type:             canonical.EventToolCallDelta,
-					Index:            cand.Index,
+					Index:            i,
 					ToolCallID:       callID,
 					ToolCallArgs:     string(argsJSON),
 					ThoughtSignature: sig,
@@ -582,7 +584,7 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 				})
 				events = append(events, canonical.CanonicalEvent{
 					Type:             canonical.EventToolCallDone,
-					Index:            cand.Index,
+					Index:            i,
 					ToolCallID:       callID,
 					ThoughtSignature: sig,
 					Model:            model,
@@ -601,6 +603,9 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 				FinishReason: reason,
 				Model:        model,
 			})
+		}
+		for i := firstEvent; i < len(events); i++ {
+			events[i].CandidateIndex = cand.Index
 		}
 	}
 
@@ -646,6 +651,15 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 		}
 	}
 
+	pending := make(map[string]string) // unresolved call ID -> name
+	usedIDs := make(map[string]bool)
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p.FunctionCall != nil && p.FunctionCall.ID != "" {
+				usedIDs[p.FunctionCall.ID] = true
+			}
+		}
+	}
 	for _, c := range req.Contents {
 		role := canonical.RoleUser
 		if c.Role == "model" {
@@ -653,8 +667,30 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 		}
 
 		var parts []canonical.ContentPart
-		for i, p := range c.Parts {
+		flushParts := func() {
+			if len(parts) > 0 {
+				out.Messages = append(out.Messages, canonical.Message{Role: role, Parts: parts})
+				parts = nil
+			}
+		}
+		for _, p := range c.Parts {
 			if p.FunctionResponse != nil {
+				flushParts()
+				resultID := p.FunctionResponse.ID
+				if resultID == "" {
+					for id, name := range pending {
+						if name == p.FunctionResponse.Name {
+							if resultID != "" {
+								return nil, fmt.Errorf("ambiguous function response %q: supply an ID", name)
+							}
+							resultID = id
+						}
+					}
+					if resultID == "" {
+						return nil, fmt.Errorf("function response %q has no preceding matching call", p.FunctionResponse.Name)
+					}
+				}
+				delete(pending, resultID)
 				respStr := ""
 				if b, err := json.Marshal(p.FunctionResponse.Response); err == nil {
 					respStr = string(b)
@@ -664,7 +700,7 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 					Parts: []canonical.ContentPart{
 						{
 							Type:              canonical.PartToolResult,
-							ToolResultID:      p.FunctionResponse.Name,
+							ToolResultID:      resultID,
 							ToolResultContent: respStr,
 						},
 					},
@@ -689,8 +725,15 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 				argsJSON, _ := json.Marshal(p.FunctionCall.Args)
 				callID := p.FunctionCall.ID
 				if callID == "" {
-					callID = fmt.Sprintf("call_%s_%d", sanitizeToolID(p.FunctionCall.Name), i)
+					for n := len(usedIDs); ; n++ {
+						callID = fmt.Sprintf("call_%s_%d", sanitizeToolID(p.FunctionCall.Name), n)
+						if !usedIDs[callID] {
+							break
+						}
+					}
 				}
+				usedIDs[callID] = true
+				pending[callID] = p.FunctionCall.Name
 				parts = append(parts, canonical.ContentPart{
 					Type:             canonical.PartToolCall,
 					ToolCallID:       callID,

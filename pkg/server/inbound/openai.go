@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -115,7 +116,9 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	}
 
 	estInTokens := session.EstimateRequestTokens(canonReq)
-	eventsChan, err := h.engine.Stream(r.Context(), canonReq)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
@@ -146,6 +149,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	streamStatus := "success"
 	var streamErr string
 
+	candidateIndex := 0
 	sendChunk := func(delta map[string]any, finishReason any) {
 		chunk := map[string]any{
 			"id":      id,
@@ -154,7 +158,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 			"model":   canonReq.Model,
 			"choices": []map[string]any{
 				{
-					"index":         0,
+					"index":         candidateIndex,
 					"delta":         delta,
 					"finish_reason": finishReason,
 				},
@@ -172,6 +176,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	sendChunk(map[string]any{"role": "assistant"}, nil)
 
 	for ev := range eventsChan {
+		candidateIndex = ev.CandidateIndex
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
 			if ev.Error != nil {
@@ -179,7 +184,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 			}
 			errChunk := map[string]any{
 				"error": map[string]any{
-					"message": ev.Error.Error(),
+					"message": streamErr,
 					"type":    "server_error",
 				},
 			}
@@ -190,6 +195,9 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		}
 
 		switch ev.Type {
+		case canonical.EventThinkingDelta:
+			totalChars += len(ev.Thinking)
+			sendChunk(map[string]any{"reasoning_content": ev.Thinking}, nil)
 		case canonical.EventTextDelta:
 			totalChars += len(ev.Text)
 			sendChunk(map[string]any{"content": ev.Text}, nil)
