@@ -482,6 +482,42 @@ func (e *Engine) SetRouting(routing config.RoutingConfig) (bool, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if err := e.validateRoutingProvidersLocked(routing); err != nil {
+		return false, err
+	}
+	persisted := e.cfg.SourcePath != ""
+	if persisted {
+		if err := config.UpdateRouting(e.cfg.SourcePath, routing); err != nil {
+			return false, err
+		}
+	}
+	e.cfg.Routing = cloneRouting(routing)
+	return persisted, nil
+}
+
+// ReloadRouting replaces the running routes with the routing section currently
+// stored in the active configuration file. Provider clients are left untouched.
+func (e *Engine) ReloadRouting() error {
+	e.mu.RLock()
+	path := e.cfg.SourcePath
+	e.mu.RUnlock()
+	routing, err := config.LoadRouting(path)
+	if err != nil {
+		return err
+	}
+	if err := validateRouting(routing); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.validateRoutingProvidersLocked(routing); err != nil {
+		return err
+	}
+	e.cfg.Routing = cloneRouting(routing)
+	return nil
+}
+
+func (e *Engine) validateRoutingProvidersLocked(routing config.RoutingConfig) error {
 	targets := make([]string, 0, len(routing.Routes)+1)
 	if routing.Default != "" {
 		targets = append(targets, routing.Default)
@@ -495,18 +531,11 @@ func (e *Engine) SetRouting(routing config.RoutingConfig) (bool, error) {
 	for _, target := range targets {
 		if slash := strings.Index(target, "/"); slash > 0 {
 			if _, ok := e.cfg.Providers[target[:slash]]; !ok {
-				return false, fmt.Errorf("route target references unknown provider %q", target[:slash])
+				return fmt.Errorf("route target references unknown provider %q", target[:slash])
 			}
 		}
 	}
-	persisted := e.cfg.SourcePath != ""
-	if persisted {
-		if err := config.UpdateRouting(e.cfg.SourcePath, routing); err != nil {
-			return false, err
-		}
-	}
-	e.cfg.Routing = cloneRouting(routing)
-	return persisted, nil
+	return nil
 }
 
 func validateRouting(routing config.RoutingConfig) error {

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,6 +59,36 @@ func TestProviderSelectionAndToggle(t *testing.T) {
 	app.handleKey("backtab")
 	if app.activePane != paneSessions {
 		t.Fatalf("shift-tab should focus previous pane, got pane %d", app.activePane)
+	}
+}
+
+func TestReloadRoutesKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	initial := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4o-mini\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4.1\n"
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &TUI{engine: engine, stopChan: make(chan struct{})}
+	app.handleKey("r")
+	route, err := engine.ResolveModel("fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.TargetModel != "gpt-4.1" {
+		t.Fatalf("R did not reload the updated route: got %q", route.TargetModel)
 	}
 }
 

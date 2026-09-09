@@ -41,6 +41,31 @@ func UpdateRouting(path string, routing RoutingConfig) error {
 	})
 }
 
+// LoadRouting reads only the routing section from a YAML configuration file.
+// Environment references are expanded exactly as they are during startup.
+func LoadRouting(path string) (RoutingConfig, error) {
+	if path == "" {
+		return RoutingConfig{}, fmt.Errorf("no configuration file is active")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return RoutingConfig{}, fmt.Errorf("reading config file: %w", err)
+	}
+	var document struct {
+		Routing RoutingConfig `yaml:"routing"`
+	}
+	if err := yaml.Unmarshal([]byte(expandEnv(string(data))), &document); err != nil {
+		return RoutingConfig{}, fmt.Errorf("parsing config file: %w", err)
+	}
+	if document.Routing.Routes == nil {
+		document.Routing.Routes = make(map[string]string)
+	}
+	if document.Routing.Fallbacks == nil {
+		document.Routing.Fallbacks = make(map[string][]string)
+	}
+	return document.Routing, nil
+}
+
 func updateYAML(path string, mutate func(*yaml.Node) error) error {
 	if path == "" {
 		return fmt.Errorf("no configuration file is active")

@@ -61,6 +61,22 @@ func TestUpdateProviderEnabledPreservesEnvironmentReference(t *testing.T) {
 	}
 }
 
+func TestLoadRouting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := "providers: {}\nrouting:\n  default: openai/gpt-4o\n  routes:\n    fast: openai/gpt-4o-mini\n  fallbacks:\n    fast: [openai/gpt-4o]\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	routing, err := LoadRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routing.Default != "openai/gpt-4o" || routing.Routes["fast"] != "openai/gpt-4o-mini" || len(routing.Fallbacks["fast"]) != 1 {
+		t.Fatalf("unexpected routing: %+v", routing)
+	}
+}
+
 func TestAutoPopulateFromEnv(t *testing.T) {
 	os.Setenv("OPENAI_API_KEY", "sk-openai")
 	os.Setenv("ANTHROPIC_API_KEY", "sk-anthropic")

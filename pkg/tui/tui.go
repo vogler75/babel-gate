@@ -303,6 +303,13 @@ func (t *TUI) handleKey(key string) bool {
 		}
 
 	case "r", "R":
+		if t.engine != nil {
+			if err := t.engine.ReloadRouting(); err != nil {
+				log.Printf("[TUI] failed to reload routes: %v", err)
+			} else {
+				log.Printf("[TUI] routes reloaded from configuration")
+			}
+		}
 		t.updateSize()
 
 	case "p", "P":
@@ -512,7 +519,7 @@ func (t *TUI) render() {
 	sb.WriteString("\r\n")
 
 	// 4. Footer Shortcuts
-	footer := fmt.Sprintf(" %sq%s Quit │ %sTab/⇧Tab%s Pane │ %s↑/↓%s Select/Scroll │ %sSpace%s Toggle Provider │ %s←/→%s Logs │ %sc%s Clear Logs",
+	footer := fmt.Sprintf(" %sq%s Quit │ %sTab/⇧Tab%s Pane │ %s↑/↓%s Select/Scroll │ %sSpace%s Toggle │ %sr%s Reload Routes │ %sc%s Clear Logs",
 		colorBold, colorReset,
 		colorBold, colorReset,
 		colorBold, colorReset,

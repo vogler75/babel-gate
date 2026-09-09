@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -154,6 +156,38 @@ func TestDisabledProviderCanBeEnabledLive(t *testing.T) {
 	route, err := engine.ResolveModel("openai/gpt-4o")
 	if err != nil || route.Provider.Name() != "openai" {
 		t.Fatalf("provider was not enabled live: route=%v err=%v", route, err)
+	}
+}
+
+func TestReloadRoutingFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	initial := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4o-mini\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4.1\n"
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.ReloadRouting(); err != nil {
+		t.Fatal(err)
+	}
+	route, err := engine.ResolveModel("fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Provider.Name() != "openai" || route.TargetModel != "gpt-4.1" {
+		t.Fatalf("reloaded route not active: %s/%s", route.Provider.Name(), route.TargetModel)
 	}
 }
 

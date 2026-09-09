@@ -365,6 +365,7 @@ GitHub Copilot can be authenticated through three convenient methods:
 
 - **Live Provider Controls**: Enable or disable configured providers without restarting from either the web dashboard or TUI; changes are written back to the active YAML file. In the TUI, use `Tab`/`Shift-Tab` to focus Providers, Sessions, or Logs, `↑`/`↓` to select or scroll within the focused pane, and `Space` to toggle the selected provider.
 - **Visual Route Editor**: Configure the default route, aliases, and fallback chains from the dashboard.
+- **Online Route Reload**: Re-read routes changed manually in the active YAML file without restarting BabelGate, using the dashboard button, `POST /api/routing`, or `R` in the TUI.
 - **Unified Model Catalog**: Interactive table of all upstream and aliased models.
 - **Streaming Prompt Playground**: Test any connected model with live token streaming and duration metrics directly in your browser.
 - **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), request counts, input/output token usage, duration, and error logs.
@@ -432,7 +433,7 @@ routing:
 | `/` | `GET` | HTML / Web | Embedded Web Dashboard & Playground |
 | `/setup` | `GET` | HTML / Web | Client Setup Guide & Integration Snippets |
 | `/api/providers/{name}` | `PUT` | JSON | Enable or disable a provider live (`{"enabled":true}`) |
-| `/api/routing` | `GET`, `PUT` | JSON | Read or replace live default, alias, and fallback routing |
+| `/api/routing` | `GET`, `PUT`, `POST` | JSON | Read, replace, or reload live routing from the active YAML file |
 | `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
 | `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
 | `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |

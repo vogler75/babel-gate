@@ -84,8 +84,16 @@ func (d *DashboardHandler) HandleAPIRouting(w http.ResponseWriter, r *http.Reque
 		_ = json.NewEncoder(w).Encode(d.engine.GetRouting())
 		return
 	}
+	if r.Method == http.MethodPost {
+		if err := d.engine.ReloadRouting(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"routing": d.engine.GetRouting(), "reloaded": true})
+		return
+	}
 	if r.Method != http.MethodPut {
-		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPut)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPut+", "+http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -580,7 +588,9 @@ const dashboardHTML = `<!DOCTYPE html>
       <div id="fallbackRows"></div>
       <datalist id="routeTargets"></datalist>
       <div style="display:flex; align-items:center; gap:.75rem; margin-top:1rem;">
-        <button onclick="saveRouting()">Save Routes</button><span id="routingStatus" class="muted"></span>
+        <button onclick="saveRouting()">Save Routes</button>
+        <button class="btn-sm" onclick="reloadRouting()">↻ Reload from YAML</button>
+        <span id="routingStatus" class="muted"></span>
       </div>
     </div>
 
@@ -863,6 +873,22 @@ const dashboardHTML = `<!DOCTYPE html>
         await loadData();
       } catch (err) {
         status.textContent = 'Save failed: ' + err.message.trim();
+      }
+    }
+
+    async function reloadRouting() {
+      const status = document.getElementById('routingStatus');
+      status.textContent = 'Reloading…';
+      try {
+        const res = await fetch('/api/routing', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        currentRouting = data.routing || { default: '', routes: {}, fallbacks: {} };
+        renderRouting();
+        status.textContent = 'Reloaded from YAML and active now.';
+        await loadData();
+      } catch (err) {
+        status.textContent = 'Reload failed: ' + err.message.trim();
       }
     }
 

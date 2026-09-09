@@ -177,6 +177,9 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "route-provider") || !contains(html, "populateRouteModelSelect") {
 		t.Errorf("expected provider-filtered virtual route model selection in dashboard HTML")
 	}
+	if !contains(html, "Reload from YAML") || !contains(html, "reloadRouting") {
+		t.Errorf("expected online route reload control in dashboard HTML")
+	}
 }
 
 func contains(s, substr string) bool {
@@ -302,6 +305,37 @@ func TestDashboardHandler_RoutingAPI(t *testing.T) {
 	}
 	if got := handler.engine.GetRoutes()["fast"]; got != "virtual-model" {
 		t.Fatalf("expected live route update, got %q", got)
+	}
+}
+
+func TestDashboardHandler_ReloadRoutingAPI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	initial := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4o-mini\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewDashboardHandler(engine, router.NewCatalog(engine), nil, nil)
+	updated := "providers:\n  openai:\n    type: openai\nrouting:\n  routes:\n    fast: openai/gpt-4.1\n"
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/routing", nil)
+	w := httptest.NewRecorder()
+	handler.HandleAPIRouting(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := engine.GetRoutes()["fast"]; got != "openai/gpt-4.1" {
+		t.Fatalf("expected reloaded route, got %q", got)
 	}
 }
 
