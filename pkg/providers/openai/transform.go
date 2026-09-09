@@ -60,7 +60,19 @@ func ToOpenAIRequest(req *canonical.CanonicalRequest) (*ChatCompletionRequest, e
 	}
 
 	// Messages
+	// Tool messages only accept text. Attach their images in a user message
+	// after the entire batch of tool replies, so parallel calls stay valid.
+	var toolImages []ContentPart
+	flushToolImages := func() {
+		if len(toolImages) > 0 {
+			out.Messages = append(out.Messages, ChatMessage{Role: "user", Content: toolImages})
+			toolImages = nil
+		}
+	}
 	for _, m := range req.Messages {
+		if m.Role != canonical.RoleTool {
+			flushToolImages()
+		}
 		switch m.Role {
 		case canonical.RoleSystem:
 			out.Messages = append(out.Messages, ChatMessage{
@@ -135,13 +147,27 @@ func ToOpenAIRequest(req *canonical.CanonicalRequest) (*ChatCompletionRequest, e
 					out.Messages = append(out.Messages, ChatMessage{
 						Role:       "tool",
 						ToolCallID: p.ToolResultID,
-						Content:    p.ToolResultContent,
+						Content:    p.ToolResultText(),
 					})
+					for _, part := range p.ToolResultParts {
+						if part.Type == canonical.PartImage {
+							url := part.ImageURL
+							if url == "" {
+								mime := part.ImageMediaType
+								if mime == "" {
+									mime = "image/png"
+								}
+								url = fmt.Sprintf("data:%s;base64,%s", mime, part.ImageData)
+							}
+							toolImages = append(toolImages, ContentPart{Type: "text", Text: "Image from tool result " + p.ToolResultID + ":"}, ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: url}})
+						}
+					}
 				}
 			}
 		}
 	}
 
+	flushToolImages()
 	return out, nil
 }
 

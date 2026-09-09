@@ -1,5 +1,7 @@
 package canonical
 
+import "strings"
+
 // Standard roles
 const (
 	RoleSystem    = "system"
@@ -43,13 +45,31 @@ type ContentPart struct {
 	// For PartToolResult
 	ToolResultID      string `json:"tool_result_id,omitempty"`
 	ToolResultContent string `json:"tool_result_content,omitempty"`
-	ToolResultError   bool   `json:"tool_result_error,omitempty"`
+	// Structured tool output, when present, takes precedence over the legacy
+	// text field. In particular, images must never become base64 prompt text.
+	ToolResultParts []ContentPart `json:"tool_result_parts,omitempty"`
+	ToolResultError bool          `json:"tool_result_error,omitempty"`
 }
 
 // Message represents a canonical conversation turn.
 type Message struct {
 	Role  string        `json:"role"`
 	Parts []ContentPart `json:"parts"`
+}
+
+// ToolResultText returns only the textual portion of a tool's result. Binary
+// content is carried separately and is never serialized into prompt text.
+func (p ContentPart) ToolResultText() string {
+	if len(p.ToolResultParts) == 0 {
+		return p.ToolResultContent
+	}
+	var texts []string
+	for _, part := range p.ToolResultParts {
+		if part.Type == PartText {
+			texts = append(texts, part.Text)
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 // TextContent returns the concatenated text content of all text parts in the message.
@@ -123,9 +143,13 @@ func (r *CanonicalRequest) NonSystemMessages() []Message {
 
 // Usage captures token counts.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	// PromptTokens includes both fresh and cached input. Cache counters are
+	// subsets of that total, never additional tokens to add to it.
+	PromptTokens             int `json:"prompt_tokens"`
+	CompletionTokens         int `json:"completion_tokens"`
+	TotalTokens              int `json:"total_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // CanonicalResponse is the normalized response returned by providers for non-streaming requests.

@@ -103,7 +103,7 @@ func TestSessionsViewShowsTokenSpeed(t *testing.T) {
 	sess := srv.Sessions().GetOrCreate("session-1", "127.0.0.1", "test", "Test Client")
 	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
 		Model: "test-model", DurationMs: 2000, GenerationDurationMs: 1000,
-		OutputTokens: 25, TotalTokens: 25, Status: "success",
+		InputTokens: 42, OutputTokens: 25, TotalTokens: 67, Status: "success",
 	})
 	second := srv.Sessions().GetOrCreate("session-2", "127.0.0.2", "test", "Other Client")
 	srv.Sessions().RecordRequest(second.ID, session.RequestRecord{
@@ -116,8 +116,9 @@ func TestSessionsViewShowsTokenSpeed(t *testing.T) {
 		t.Fatal("tab should focus the sessions pane")
 	}
 	lines := app.getSessionsInfo(8)
-	if len(lines) != 2 || !strings.Contains(stripANSI(strings.Join(lines, "\n")), "25.0 tok/s") {
-		t.Fatalf("session token speed not rendered: %q", lines)
+	plainLines := stripANSI(strings.Join(lines, "\n"))
+	if len(lines) != 2 || !strings.Contains(plainLines, "25.0 tok/s") || !strings.Contains(plainLines, "Ctx:42") {
+		t.Fatalf("session token telemetry not rendered: %q", lines)
 	}
 	var sessionOneLine string
 	for _, line := range lines {

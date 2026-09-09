@@ -3,10 +3,27 @@ package google
 import "encoding/json"
 
 type GenerateContentRequest struct {
+	Model             string            `json:"model,omitempty"`
 	Contents          []Content         `json:"contents"`
 	SystemInstruction *Content          `json:"systemInstruction,omitempty"`
 	Tools             []Tool            `json:"tools,omitempty"`
 	GenerationConfig  *GenerationConfig `json:"generationConfig,omitempty"`
+}
+
+type CountTokensRequest struct {
+	GenerateContentRequest *GenerateContentRequest `json:"generateContentRequest"`
+}
+
+type CountTokensResponse struct {
+	TotalTokens int `json:"totalTokens"`
+}
+
+type ErrorResponse struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	} `json:"error"`
 }
 
 type Content struct {
@@ -54,6 +71,7 @@ type FunctionResponse struct {
 	ID       string         `json:"id,omitempty"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response"`
+	Parts    []Part         `json:"parts,omitempty"`
 }
 
 type Tool struct {

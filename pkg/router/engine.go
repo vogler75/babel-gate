@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,6 +22,8 @@ type ResolvedRoute struct {
 	Provider    providers.Provider
 	TargetModel string
 }
+
+var ErrTokenCountingUnsupported = errors.New("routed provider does not support token counting")
 
 type Engine struct {
 	mu             sync.RWMutex
@@ -310,6 +313,25 @@ func (e *Engine) findProviderByType(pType string) providers.Provider {
 		}
 	}
 	return nil
+}
+
+// CountTokens asks the resolved upstream provider to tokenize the translated
+// request with the exact target model tokenizer.
+func (e *Engine) CountTokens(ctx context.Context, req *canonical.CanonicalRequest) (int, error) {
+	if req == nil {
+		return 0, fmt.Errorf("request is required")
+	}
+	route, err := e.ResolveModel(req.Model)
+	if err != nil {
+		return 0, err
+	}
+	counter, ok := route.Provider.(providers.TokenCounter)
+	if !ok {
+		return 0, ErrTokenCountingUnsupported
+	}
+	targetReq := *req
+	targetReq.Model = route.TargetModel
+	return counter.CountTokens(ctx, &targetReq)
 }
 
 // Execute routes a non-streaming canonical request to the appropriate upstream provider.

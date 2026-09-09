@@ -10,6 +10,7 @@ import (
 
 	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/session"
 )
 
 func runProtocolStream(t *testing.T, protocol, upstreamData string) string {
@@ -212,6 +213,99 @@ func TestAnthropicPassthroughNormalizesNames(t *testing.T) {
 			NewAnthropicHandler(engine, router.NewCatalog(engine), nil).HandleMessages(w, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
 			if w.Code != 200 || !strings.Contains(w.Body.String(), `"name":"math.add"`) {
 				t.Fatalf("name not restored: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAnthropicReceivesLateGooglePromptUsageAfterRestart(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\n")
+		// Usage arrives only after content. It must replace the initial estimate.
+		fmt.Fprint(w, "data: {\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":999000,\"candidatesTokenCount\":5,\"totalTokenCount\":999005}}\n\n")
+	}))
+	defer upstream.Close()
+	for restart := 0; restart < 2; restart++ {
+		// Recreating the engine and session manager simulates a gateway restart.
+		engine, err := router.NewEngine(&config.Config{Providers: map[string]config.ProviderConfig{"mock": {Type: "google", BaseURL: upstream.URL}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessions := session.NewManager()
+		handler := NewAnthropicHandler(engine, router.NewCatalog(engine), sessions)
+		request := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"mock/gemini-test","stream":true,"messages":[{"role":"user","content":"full conversation supplied by client"}]}`))
+		request.Header.Set("x-session-id", "same-conversation")
+		w := httptest.NewRecorder()
+		handler.HandleMessages(w, request)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		inputTokens, outputTokens := 0, 0
+		sawCorrection := false
+		for _, line := range strings.Split(w.Body.String(), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var event struct {
+				Type    string `json:"type"`
+				Message struct {
+					Usage struct {
+						InputTokens int `json:"input_tokens"`
+					} `json:"usage"`
+				} `json:"message"`
+				Usage struct {
+					InputTokens  *int `json:"input_tokens"`
+					OutputTokens int  `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Type == "message_start" {
+				inputTokens = event.Message.Usage.InputTokens
+			}
+			if event.Type == "message_delta" {
+				if event.Usage.InputTokens != nil {
+					inputTokens = *event.Usage.InputTokens
+					sawCorrection = true
+				}
+				outputTokens = event.Usage.OutputTokens
+			}
+		}
+		if !sawCorrection || inputTokens != 999000 || outputTokens != 5 {
+			t.Fatalf("client kept inaccurate usage after restart %d: input=%d output=%d", restart, inputTokens, outputTokens)
+		}
+		got := sessions.ListSessions()
+		if len(got) != 1 || got[0].ContextTokens != inputTokens || got[0].ContextTokensEstimated {
+			t.Fatalf("client and dashboard context disagree: %+v", got)
+		}
+	}
+}
+
+func TestAnthropicPassthroughContextIncludesCachedInput(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if stream {
+					fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":100000,\"cache_creation_input_tokens\":7137}}}\n\n")
+					fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":363,\"output_tokens\":5}}\n\ndata: {\"type\":\"message_stop\"}\n\n")
+				} else {
+					fmt.Fprint(w, `{"usage":{"input_tokens":363,"cache_read_input_tokens":100000,"cache_creation_input_tokens":7137,"output_tokens":5}}`)
+				}
+			}))
+			defer upstream.Close()
+			engine, err := router.NewEngine(&config.Config{Providers: map[string]config.ProviderConfig{"mock": {Type: "anthropic", BaseURL: upstream.URL}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := session.NewManager()
+			handler := NewAnthropicHandler(engine, router.NewCatalog(engine), sessions)
+			w := httptest.NewRecorder()
+			handler.HandleMessages(w, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":"mock/claude-test","stream":%t,"messages":[{"role":"user","content":"hello"}]}`, stream))))
+			got := sessions.ListSessions()
+			if w.Code != 200 || len(got) != 1 || got[0].ContextTokens != 107500 || got[0].ContextTokensEstimated {
+				t.Fatalf("cache accounting lost: status=%d sessions=%+v", w.Code, got)
 			}
 		})
 	}

@@ -174,6 +174,9 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "Output Speed") || !contains(html, "tokens_per_second") {
 		t.Errorf("expected per-session token generation speed in dashboard HTML")
 	}
+	if !contains(html, "Context Tokens") || !contains(html, "context_tokens") {
+		t.Errorf("expected latest context token count in dashboard session list")
+	}
 	if !contains(html, "route-provider") || !contains(html, "populateRouteModelSelect") {
 		t.Errorf("expected provider-filtered virtual route model selection in dashboard HTML")
 	}

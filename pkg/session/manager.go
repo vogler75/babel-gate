@@ -28,6 +28,7 @@ type RequestRecord struct {
 	DurationMs           int64     `json:"duration_ms"`
 	GenerationDurationMs int64     `json:"generation_duration_ms"`
 	InputTokens          int       `json:"input_tokens"`
+	InputTokensEstimated bool      `json:"input_tokens_estimated,omitempty"`
 	OutputTokens         int       `json:"output_tokens"`
 	TotalTokens          int       `json:"total_tokens"`
 	TokensPerSecond      float64   `json:"tokens_per_second"`
@@ -37,21 +38,23 @@ type RequestRecord struct {
 
 // Session tracks an ongoing client conversation/session and its aggregated token usage.
 type Session struct {
-	ID                   string    `json:"id"`
-	Client               string    `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
-	ClientIP             string    `json:"client_ip,omitempty"`
-	UserAgent            string    `json:"user_agent,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
-	LastActive           time.Time `json:"last_active"`
-	RequestCount         int       `json:"request_count"`
-	InputTokens          int       `json:"input_tokens"`
-	OutputTokens         int       `json:"output_tokens"`
-	TotalTokens          int       `json:"total_tokens"`
-	TokensPerSecond      float64   `json:"tokens_per_second"`
-	generationDurationMs int64
-	measuredOutputTokens int
-	Models               []string        `json:"models"`
-	RecentRequests       []RequestRecord `json:"recent_requests,omitempty"`
+	ID                     string    `json:"id"`
+	Client                 string    `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
+	ClientIP               string    `json:"client_ip,omitempty"`
+	UserAgent              string    `json:"user_agent,omitempty"`
+	CreatedAt              time.Time `json:"created_at"`
+	LastActive             time.Time `json:"last_active"`
+	RequestCount           int       `json:"request_count"`
+	ContextTokens          int       `json:"context_tokens"` // input tokens in the most recent request
+	ContextTokensEstimated bool      `json:"context_tokens_estimated,omitempty"`
+	InputTokens            int       `json:"input_tokens"`
+	OutputTokens           int       `json:"output_tokens"`
+	TotalTokens            int       `json:"total_tokens"`
+	TokensPerSecond        float64   `json:"tokens_per_second"`
+	generationDurationMs   int64
+	measuredOutputTokens   int
+	Models                 []string        `json:"models"`
+	RecentRequests         []RequestRecord `json:"recent_requests,omitempty"`
 }
 
 // Summary provides aggregate metrics across all tracked sessions.
@@ -241,6 +244,8 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 
 	s.LastActive = rec.Timestamp
 	s.RequestCount++
+	s.ContextTokens = rec.InputTokens
+	s.ContextTokensEstimated = rec.InputTokensEstimated
 	s.InputTokens += rec.InputTokens
 	s.OutputTokens += rec.OutputTokens
 	s.TotalTokens += rec.TotalTokens
@@ -420,7 +425,7 @@ func EstimateRequestTokens(req *canonical.CanonicalRequest) int {
 			totalChars += len(p.Text)
 			totalChars += len(p.Thinking)
 			totalChars += len(p.ToolCallArgs)
-			totalChars += len(p.ToolResultContent)
+			totalChars += len(p.ToolResultText())
 		}
 	}
 

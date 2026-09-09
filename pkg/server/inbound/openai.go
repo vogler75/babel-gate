@@ -78,13 +78,14 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       false,
-				DurationMs:   durationMs,
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               false,
+				DurationMs:           durationMs,
+				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
 		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
@@ -92,6 +93,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	}
 
 	inTokens := resp.Usage.PromptTokens
+	inputEstimated := inTokens == 0
 	if inTokens == 0 {
 		inTokens = estInTokens
 	}
@@ -106,14 +108,15 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       false,
-			DurationMs:   durationMs,
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       "success",
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               false,
+			DurationMs:           durationMs,
+			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               "success",
 		})
 	}
 
@@ -143,13 +146,14 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       true,
-				DurationMs:   time.Since(startTime).Milliseconds(),
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               true,
+				DurationMs:           time.Since(startTime).Milliseconds(),
+				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
 		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
@@ -166,6 +170,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	created := time.Now().Unix()
 
 	inTokens := estInTokens
+	inputEstimated := true
 	outTokens := 0
 	totalChars := 0
 	streamStatus := "success"
@@ -264,6 +269,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 			if ev.Usage != nil {
 				if ev.Usage.PromptTokens > 0 {
 					inTokens = ev.Usage.PromptTokens
+					inputEstimated = false
 				}
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
@@ -311,6 +317,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 			DurationMs:           time.Since(startTime).Milliseconds(),
 			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
 			TotalTokens:          inTokens + outTokens,
 			Status:               streamStatus,

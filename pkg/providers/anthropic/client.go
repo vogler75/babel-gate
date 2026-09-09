@@ -185,6 +185,7 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 		var currentEvent string
+		var accumulatedUsage Usage
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "event: ") {
@@ -193,7 +194,7 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 			}
 			if strings.HasPrefix(line, "data: ") {
 				dataStr := strings.TrimPrefix(line, "data: ")
-				events, err := ParseAnthropicStreamEvent([]byte(dataStr))
+				events, err := parseAnthropicStreamEvent([]byte(dataStr), &accumulatedUsage)
 				if err != nil {
 					send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
 					return

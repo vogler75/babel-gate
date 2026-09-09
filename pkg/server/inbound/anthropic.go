@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
+	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/providers/anthropic"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/server/trace"
@@ -30,6 +32,55 @@ func NewAnthropicHandler(engine *router.Engine, catalog *router.Catalog, session
 		catalog:  catalog,
 		sessions: sessions,
 	}
+}
+
+func anthropicError(err error) (int, string, string) {
+	statusCode := http.StatusBadGateway
+	errorType := "api_error"
+	message := err.Error()
+	var upstream *providers.APIError
+	if !errors.As(err, &upstream) {
+		return statusCode, errorType, message
+	}
+	message = upstream.Message
+	if upstream.Provider != "" {
+		message = upstream.Provider + ": " + message
+	}
+	switch upstream.StatusCode {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		statusCode, errorType = http.StatusBadRequest, "invalid_request_error"
+		if strings.Contains(strings.ToLower(upstream.Message), "input token count exceeds") {
+			message = "prompt is too long: " + message
+		}
+	case http.StatusUnauthorized:
+		statusCode, errorType = http.StatusUnauthorized, "authentication_error"
+	case http.StatusForbidden:
+		statusCode, errorType = http.StatusForbidden, "permission_error"
+	case http.StatusNotFound:
+		statusCode, errorType = http.StatusNotFound, "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		statusCode, errorType = http.StatusRequestEntityTooLarge, "request_too_large"
+	case http.StatusTooManyRequests:
+		statusCode, errorType = http.StatusTooManyRequests, "rate_limit_error"
+	}
+	return statusCode, errorType, message
+}
+
+func writeAnthropicError(w http.ResponseWriter, err error) {
+	statusCode, errorType, message := anthropicError(err)
+	writeAnthropicErrorResponse(w, statusCode, errorType, message)
+}
+
+func writeAnthropicErrorResponse(w http.ResponseWriter, statusCode int, errorType, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    errorType,
+			"message": message,
+		},
+	})
 }
 
 func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +136,46 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 	} else {
 		h.handleStreaming(w, r, canonReq, sess, startTime)
 	}
+}
+
+// HandleCountTokens implements Anthropic's token-counting shape. Providers
+// with a native tokenizer are used when available; other providers fall back
+// to BabelGate's approximate request estimator.
+func (h *AnthropicHandler) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAnthropicErrorResponse(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	var req anthropic.MessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAnthropicErrorResponse(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON: "+err.Error())
+		return
+	}
+	canonReq, err := anthropic.FromAnthropicRequest(&req)
+	if err != nil {
+		writeAnthropicErrorResponse(w, http.StatusBadRequest, "invalid_request_error", "invalid request: "+err.Error())
+		return
+	}
+	if key := r.Header.Get("x-api-key"); key != "" {
+		canonReq.AuthToken = key
+	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		canonReq.AuthToken = strings.TrimPrefix(auth, "Bearer ")
+	}
+	inputTokens, err := h.engine.CountTokens(r.Context(), canonReq)
+	if errors.Is(err, router.ErrTokenCountingUnsupported) {
+		inputTokens = session.EstimateRequestTokens(canonReq)
+		err = nil
+	}
+	if err != nil {
+		writeAnthropicError(w, err)
+		return
+	}
+	// Clients count individual tools/system sections to build /context. These
+	// probes are not the conversation's full prompt and must not replace its
+	// context measurement or create generation sessions.
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": inputTokens})
 }
 
 // sanitizeAnthropicPayload cleanses incoming messages so Anthropic / Vertex validation rules pass:
@@ -229,12 +320,13 @@ func (h *AnthropicHandler) handlePassthrough(
 			prov := anthClient.Name()
 			trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       req.Stream,
-				DurationMs:   time.Since(startTime).Milliseconds(),
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               req.Stream,
+				DurationMs:           time.Since(startTime).Milliseconds(),
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
@@ -254,6 +346,7 @@ func (h *AnthropicHandler) handlePassthrough(
 
 	inTokens := 0
 	outTokens := 0
+	var upstreamUsage anthropic.Usage
 	estInTokens := session.EstimateTokens(string(upstreamBody))
 
 	tr := trace.FromContext(r.Context())
@@ -284,29 +377,18 @@ func (h *AnthropicHandler) handlePassthrough(
 						var event struct {
 							Type    string `json:"type"`
 							Message struct {
-								Usage struct {
-									InputTokens  int `json:"input_tokens"`
-									OutputTokens int `json:"output_tokens"`
-								} `json:"usage"`
+								Usage json.RawMessage `json:"usage"`
 							} `json:"message"`
-							Usage struct {
-								InputTokens  int `json:"input_tokens"`
-								OutputTokens int `json:"output_tokens"`
-							} `json:"usage"`
+							Usage json.RawMessage `json:"usage"`
 						}
 						if jErr := json.Unmarshal(dataPayload, &event); jErr == nil {
-							if event.Message.Usage.InputTokens > 0 {
-								inTokens = event.Message.Usage.InputTokens
+							for _, raw := range []json.RawMessage{event.Message.Usage, event.Usage} {
+								if len(raw) > 0 {
+									_ = json.Unmarshal(raw, &upstreamUsage)
+								}
 							}
-							if event.Usage.InputTokens > 0 {
-								inTokens = event.Usage.InputTokens
-							}
-							if event.Message.Usage.OutputTokens > 0 {
-								outTokens = event.Message.Usage.OutputTokens
-							}
-							if event.Usage.OutputTokens > 0 {
-								outTokens = event.Usage.OutputTokens
-							}
+							inTokens = upstreamUsage.TotalInputTokens()
+							outTokens = upstreamUsage.OutputTokens
 						}
 					}
 				}
@@ -321,19 +403,17 @@ func (h *AnthropicHandler) handlePassthrough(
 		if len(respBytes) > 0 {
 			_, _ = w.Write(respBytes)
 			var nonStreamResp struct {
-				Usage struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
-				} `json:"usage"`
+				Usage anthropic.Usage `json:"usage"`
 			}
 			if jErr := json.Unmarshal(respBytes, &nonStreamResp); jErr == nil {
-				inTokens = nonStreamResp.Usage.InputTokens
+				inTokens = nonStreamResp.Usage.TotalInputTokens()
 				outTokens = nonStreamResp.Usage.OutputTokens
 			}
 		}
 	}
 
-	if inTokens == 0 {
+	inputEstimated := inTokens == 0
+	if inputEstimated {
 		inTokens = estInTokens
 	}
 	totalTokens := inTokens + outTokens
@@ -361,6 +441,7 @@ func (h *AnthropicHandler) handlePassthrough(
 			DurationMs:           time.Since(startTime).Milliseconds(),
 			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
 			TotalTokens:          totalTokens,
 			Status:               status,
@@ -382,20 +463,22 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       false,
-				DurationMs:   durationMs,
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               false,
+				DurationMs:           durationMs,
+				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
-		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
+		writeAnthropicError(w, err)
 		return
 	}
 
 	inTokens := resp.Usage.PromptTokens
+	inputEstimated := inTokens == 0
 	if inTokens == 0 {
 		inTokens = estInTokens
 	}
@@ -410,14 +493,15 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       false,
-			DurationMs:   durationMs,
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       "success",
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               false,
+			DurationMs:           durationMs,
+			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               "success",
 		})
 	}
 
@@ -447,16 +531,17 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       true,
-				DurationMs:   time.Since(startTime).Milliseconds(),
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               true,
+				DurationMs:           time.Since(startTime).Milliseconds(),
+				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
-		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
+		writeAnthropicError(w, err)
 		return
 	}
 
@@ -482,10 +567,11 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	sendSSE("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
-			"id":    messageID,
-			"type":  "message",
-			"role":  "assistant",
-			"model": modelName,
+			"id":      messageID,
+			"type":    "message",
+			"role":    "assistant",
+			"model":   modelName,
+			"content": []any{},
 			"usage": map[string]any{
 				"input_tokens":  estInTokens,
 				"output_tokens": 0,
@@ -497,6 +583,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	activeBlockType := "" // "text", "thinking", "tool_use"
 	stopReason := "end_turn"
 	inTokens := estInTokens
+	inputEstimated := true
 	outTokens := 0
 	totalTextChars := 0
 	streamStatus := "success"
@@ -524,14 +611,17 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		}
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
-			if ev.Error != nil {
-				streamErr = ev.Error.Error()
+			translatedErr := ev.Error
+			if translatedErr == nil {
+				translatedErr = errors.New("upstream stream error")
 			}
+			streamErr = translatedErr.Error()
+			_, errorType, message := anthropicError(translatedErr)
 			sendSSE("error", map[string]any{
 				"type": "error",
 				"error": map[string]any{
-					"type":    "api_error",
-					"message": streamErr,
+					"type":    errorType,
+					"message": message,
 				},
 			})
 			return
@@ -541,6 +631,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		case canonical.EventMessageStart:
 			if ev.Usage != nil && ev.Usage.PromptTokens > 0 {
 				inTokens = ev.Usage.PromptTokens
+				inputEstimated = false
 			}
 
 		case canonical.EventThinkingDelta:
@@ -614,6 +705,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			if ev.Usage != nil {
 				if ev.Usage.PromptTokens > 0 {
 					inTokens = ev.Usage.PromptTokens
+					inputEstimated = false
 				}
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
@@ -642,6 +734,9 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			"stop_sequence": nil,
 		},
 		"usage": map[string]any{
+			// Google/OpenAI may only report prompt usage at the end of a stream.
+			// Anthropic clients apply this cumulative correction to message_start.
+			"input_tokens":  inTokens,
 			"output_tokens": outTokens,
 		},
 	})
@@ -662,6 +757,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			DurationMs:           time.Since(startTime).Milliseconds(),
 			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
 			TotalTokens:          inTokens + outTokens,
 			Status:               streamStatus,

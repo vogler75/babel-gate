@@ -369,9 +369,13 @@ GitHub Copilot can be authenticated through three convenient methods:
 - **OpenCode Config Generator**: Select models from the dashboard catalog and generate a copyable `provider.babelgate` JSON fragment using the current dashboard URL.
 - **Unified Model Catalog**: Interactive table of all upstream and aliased models, filterable by provider and model name.
 - **Streaming Prompt Playground**: Test any connected model with live token streaming and duration metrics directly in your browser.
-- **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), request counts, input/output token usage, duration, and error logs.
+- **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), the latest generation request's full input context (including cached input), cumulative input/output token usage, generation speed, duration, and error logs. Dashboard and TUI prefix fallback estimates with `~`. Token-count probes do not replace the session context because clients may count individual tools or prompt sections. Session statistics are in memory and reset on restart; the next generation measures the full prompt again.
 - **Generation Throughput**: Compare output tokens per second for each completed request and session. Streaming throughput excludes time-to-first-token.
 - **Setup & Client Integration Guide**: Step-by-step guides and configuration snippets at `/setup` for Claude Code, Codex CLI, Antigravity CLI, OpenAI SDK, Gemini SDK, and GitHub Copilot.
+
+For Anthropic clients routed to Google, BabelGate returns the upstream prompt usage in the final streaming `message_delta`, correcting the initial estimate. The `/v1/messages/count_tokens` endpoint uses the routed Google model's tokenizer and supports both Gemini Developer API and Vertex-style gateway payloads. Other providers currently use a rough text estimate. Google context-overflow errors are returned as HTTP 400 `invalid_request_error` with `prompt is too long` and the upstream details. A client may still have its own model window setting and counting logic; restarting BabelGate does not compact the conversation stored by the client.
+
+Base64 images inside Anthropic tool results are preserved as multimodal content. Gemini 3 receives images inside their corresponding function responses; earlier Gemini models receive ordinary image parts alongside the responses. Images are not serialized into tool-result text, which can otherwise greatly inflate the input token count.
 
 ---
 
@@ -435,6 +439,7 @@ routing:
 | `/setup` | `GET` | HTML / Web | Client Setup Guide & Integration Snippets |
 | `/api/providers/{name}` | `PUT` | JSON | Enable or disable a provider live (`{"enabled":true}`) |
 | `/api/routing` | `GET`, `PUT`, `POST` | JSON | Read, replace, or reload live routing from the active YAML file |
+| `/v1/messages/count_tokens` | `POST` | Anthropic Token Counting | Count input tokens with the routed provider's native tokenizer when available |
 | `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
 | `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
 | `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |

@@ -99,10 +99,23 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 				})
 
 			case canonical.PartToolResult:
+				var content any = p.ToolResultContent
+				if len(p.ToolResultParts) > 0 {
+					var resultBlocks []ContentBlock
+					for _, part := range p.ToolResultParts {
+						switch part.Type {
+						case canonical.PartText:
+							resultBlocks = append(resultBlocks, ContentBlock{Type: "text", Text: part.Text})
+						case canonical.PartImage:
+							resultBlocks = append(resultBlocks, ContentBlock{Type: "image", Source: &ImageSource{Type: "base64", MediaType: part.ImageMediaType, Data: part.ImageData}})
+						}
+					}
+					content = resultBlocks
+				}
 				blocks = append(blocks, ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: p.ToolResultID,
-					Content:   p.ToolResultContent,
+					Content:   content,
 					IsError:   p.ToolResultError,
 				})
 			}
@@ -172,19 +185,37 @@ func FromAnthropicResponse(resp *MessageResponse) (*canonical.CanonicalResponse,
 		Model:        resp.Model,
 		Message:      msg,
 		FinishReason: finishReason,
-		Usage: canonical.Usage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
+		Usage:        resp.Usage.Canonical(),
 	}, nil
 }
 
 // ParseAnthropicStreamEvent converts Anthropic SSE line into canonical events.
 func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) {
+	return parseAnthropicStreamEvent(data, &Usage{})
+}
+
+func parseAnthropicStreamEvent(data []byte, accumulated *Usage) ([]canonical.CanonicalEvent, error) {
 	var event StreamEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		return nil, err
+	}
+	// Usage deltas omit unchanged counters. Decode into the existing value so
+	// final fresh-input corrections preserve cache reads/writes from the start.
+	var envelope struct {
+		Message struct {
+			Usage json.RawMessage `json:"usage"`
+		} `json:"message"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	for _, raw := range []json.RawMessage{envelope.Message.Usage, envelope.Usage} {
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, accumulated); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	var out []canonical.CanonicalEvent
@@ -196,9 +227,7 @@ func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) 
 				Type:      canonical.EventMessageStart,
 				MessageID: event.Message.ID,
 				Model:     event.Message.Model,
-				Usage: &canonical.Usage{
-					PromptTokens: event.Message.Usage.InputTokens,
-				},
+				Usage:     usagePointer(accumulated.Canonical()),
 			})
 		}
 
@@ -263,9 +292,7 @@ func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) 
 		}
 		var usage *canonical.Usage
 		if event.Usage != nil {
-			usage = &canonical.Usage{
-				CompletionTokens: event.Usage.OutputTokens,
-			}
+			usage = usagePointer(accumulated.Canonical())
 		}
 		out = append(out, canonical.CanonicalEvent{
 			Type:         canonical.EventMessageDelta,
@@ -281,6 +308,8 @@ func ParseAnthropicStreamEvent(data []byte) ([]canonical.CanonicalEvent, error) 
 
 	return out, nil
 }
+
+func usagePointer(usage canonical.Usage) *canonical.Usage { return &usage }
 
 // FromAnthropicRequest converts an incoming Anthropic MessageRequest into a CanonicalRequest.
 func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, error) {
@@ -411,10 +440,32 @@ func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, err
 					toolUseID, _ := blockMap["tool_use_id"].(string)
 					isErr, _ := blockMap["is_error"].(bool)
 					resContent := ""
+					var resultParts []canonical.ContentPart
 					if resVal, ok := blockMap["content"]; ok {
 						switch r := resVal.(type) {
 						case string:
 							resContent = r
+						case []any:
+							for _, item := range r {
+								block, _ := item.(map[string]any)
+								if block["type"] == "text" {
+									text, _ := block["text"].(string)
+									resultParts = append(resultParts, canonical.ContentPart{Type: canonical.PartText, Text: text})
+									continue
+								}
+								if block["type"] == "image" {
+									source, _ := block["source"].(map[string]any)
+									if source["type"] == "base64" {
+										data, _ := source["data"].(string)
+										mime, _ := source["media_type"].(string)
+										resultParts = append(resultParts, canonical.ContentPart{Type: canonical.PartImage, ImageData: data, ImageMediaType: mime})
+										continue
+									}
+								}
+								// Retain unfamiliar blocks as text instead of dropping them.
+								data, _ := json.Marshal(item)
+								resultParts = append(resultParts, canonical.ContentPart{Type: canonical.PartText, Text: string(data)})
+							}
 						default:
 							b, _ := json.Marshal(r)
 							resContent = string(b)
@@ -436,6 +487,7 @@ func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, err
 								Type:              canonical.PartToolResult,
 								ToolResultID:      toolUseID,
 								ToolResultContent: resContent,
+								ToolResultParts:   resultParts,
 								ToolResultError:   isErr,
 							},
 						},
@@ -505,9 +557,6 @@ func ToAnthropicResponse(resp *canonical.CanonicalResponse) (*MessageResponse, e
 		Model:      resp.Model,
 		Content:    blocks,
 		StopReason: stopReason,
-		Usage: Usage{
-			InputTokens:  resp.Usage.PromptTokens,
-			OutputTokens: resp.Usage.CompletionTokens,
-		},
+		Usage:      FromCanonicalUsage(resp.Usage),
 	}, nil
 }

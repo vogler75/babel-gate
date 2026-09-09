@@ -649,9 +649,13 @@ func (t *TUI) getSessionsInfo(limit int) []string {
 		if absoluteIndex == t.sessionSelection {
 			selector = "▶"
 		}
-		lines = append(lines, fmt.Sprintf(" %s %-18s Req:%-4d Out:%-7s Speed:%s%-11s%s Active:%-8s %s%s%s ID:%s%s%s",
+		contextTokens := formatTokens(int64(sess.ContextTokens))
+		if sess.ContextTokensEstimated {
+			contextTokens = "~" + contextTokens
+		}
+		lines = append(lines, fmt.Sprintf(" %s %-18s Req:%-4d Ctx:%-7s Out:%-7s Speed:%s%-11s%s Active:%-8s %s%s%s ID:%s%s%s",
 			selector,
-			truncatePlain(sess.Client, 18), sess.RequestCount, formatTokens(int64(sess.OutputTokens)),
+			truncatePlain(sess.Client, 18), sess.RequestCount, contextTokens, formatTokens(int64(sess.OutputTokens)),
 			colorGreen, rate, colorReset, formatShortAge(age),
 			colorDim, model, colorReset,
 			colorBold+colorCyan, sess.ID, colorReset))

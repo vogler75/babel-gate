@@ -89,13 +89,14 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       false,
-				DurationMs:   durationMs,
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               false,
+				DurationMs:           durationMs,
+				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
 		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
@@ -103,6 +104,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	}
 
 	inTokens := resp.Usage.PromptTokens
+	inputEstimated := inTokens == 0
 	if inTokens == 0 {
 		inTokens = estInTokens
 	}
@@ -117,14 +119,15 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       false,
-			DurationMs:   durationMs,
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       "success",
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               false,
+			DurationMs:           durationMs,
+			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               "success",
 		})
 	}
 
@@ -193,6 +196,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 				DurationMs:           time.Since(startTime).Milliseconds(),
 				GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 				InputTokens:          estInTokens,
+				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
 			})
@@ -208,6 +212,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	flusher.Flush()
 
 	inTokens := estInTokens
+	inputEstimated := true
 	outTokens := 0
 	totalChars := 0
 	streamStatus := "success"
@@ -292,6 +297,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			if ev.Usage != nil {
 				if ev.Usage.PromptTokens > 0 {
 					inTokens = ev.Usage.PromptTokens
+					inputEstimated = false
 				}
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
@@ -337,6 +343,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			DurationMs:           time.Since(startTime).Milliseconds(),
 			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 			InputTokens:          inTokens,
+			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
 			TotalTokens:          inTokens + outTokens,
 			Status:               streamStatus,

@@ -544,7 +544,8 @@ const dashboardHTML = `<!DOCTYPE html>
               <th>Client</th>
               <th>Models Used</th>
               <th>Requests</th>
-              <th>Input Tokens</th>
+              <th title="Full input of the latest generation request, including cached tokens. ~ means estimated. Session statistics reset on restart.">Context Tokens</th>
+              <th title="Cumulative input tokens across the session">Input Total</th>
               <th>Output Tokens</th>
               <th>Output Speed</th>
               <th>Total Tokens</th>
@@ -553,7 +554,7 @@ const dashboardHTML = `<!DOCTYPE html>
             </tr>
           </thead>
           <tbody id="sessionsTable">
-            <tr><td colspan="10" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>
+            <tr><td colspan="11" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>
           </tbody>
         </table>
       </div>
@@ -953,7 +954,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         const tableBody = document.getElementById('sessionsTable');
         if (sessions.length === 0) {
-          tableBody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>';
+          tableBody.innerHTML = '<tr><td colspan="11" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>';
           return;
         }
 
@@ -972,6 +973,7 @@ const dashboardHTML = `<!DOCTYPE html>
             '<td><span class="pill ' + clientPill + '">' + escapeHtml(s.client || 'Client') + '</span></td>' +
             '<td>' + modelsHtml + '</td>' +
             '<td><strong>' + formatNumber(reqCount) + '</strong></td>' +
+            '<td title="' + (s.context_tokens_estimated ? 'Estimated input of the latest request' : 'Provider-reported input of the latest request, including cache') + '"><strong class="token-in">' + (s.context_tokens_estimated ? '~' : '') + formatNumber(s.context_tokens) + '</strong></td>' +
             '<td><span class="token-in">' + formatNumber(s.input_tokens) + '</span></td>' +
             '<td><span class="token-out">' + formatNumber(s.output_tokens) + '</span></td>' +
             '<td><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(s.tokens_per_second) + '</strong></td>' +
@@ -1013,7 +1015,7 @@ const dashboardHTML = `<!DOCTYPE html>
               '</tbody></table>';
           }
 
-          detailsTr.innerHTML = '<td colspan="10" style="background: #11151c; padding: 0.75rem 1rem; border-top: 1px dashed var(--border);">' +
+          detailsTr.innerHTML = '<td colspan="11" style="background: #11151c; padding: 0.75rem 1rem; border-top: 1px dashed var(--border);">' +
             '<div style="font-size: 0.82rem; font-weight: 600; color: #8b949e; margin-bottom: 0.35rem;">Request History for Session ' + escapeHtml(s.id) + '</div>' +
             requestsHtml +
             '</td>';

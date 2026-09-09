@@ -88,19 +88,7 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 					if fnName == "" {
 						fnName = p.ToolResultID
 					}
-					respMap := map[string]any{
-						"output": p.ToolResultContent,
-					}
-					if p.ToolResultError {
-						respMap["error"] = true
-					}
-					parts = append(parts, Part{
-						FunctionResponse: &FunctionResponse{
-							ID:       p.ToolResultID,
-							Name:     fnName,
-							Response: respMap,
-						},
-					})
+					parts = append(parts, googleToolResultParts(p, fnName, req.Model)...)
 				}
 			}
 			if len(parts) > 0 {
@@ -168,19 +156,7 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 					if fnName == "" {
 						fnName = p.ToolResultID
 					}
-					respMap := map[string]any{
-						"output": p.ToolResultContent,
-					}
-					if p.ToolResultError {
-						respMap["error"] = true
-					}
-					parts = append(parts, Part{
-						FunctionResponse: &FunctionResponse{
-							ID:       p.ToolResultID,
-							Name:     fnName,
-							Response: respMap,
-						},
-					})
+					parts = append(parts, googleToolResultParts(p, fnName, req.Model)...)
 				}
 			}
 			if len(parts) > 0 {
@@ -292,6 +268,32 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 	}
 
 	return out, nil
+}
+
+func googleToolResultParts(p canonical.ContentPart, name, model string) []Part {
+	response := &FunctionResponse{ID: p.ToolResultID, Name: name, Response: map[string]any{"output": p.ToolResultText()}}
+	if p.ToolResultError {
+		response.Response["error"] = true
+	}
+	var images []Part
+	for _, part := range p.ToolResultParts {
+		if part.Type == canonical.PartImage {
+			mime := part.ImageMediaType
+			if mime == "" {
+				mime = "image/png"
+			}
+			images = append(images, Part{InlineData: &Blob{MimeType: mime, Data: part.ImageData}})
+		}
+	}
+	model = strings.TrimPrefix(strings.TrimPrefix(model, "google/"), "models/")
+	if strings.HasPrefix(model, "gemini-3") {
+		// Gemini 3 supports images inside their corresponding tool response.
+		response.Parts = images
+		return []Part{{FunctionResponse: response}}
+	}
+	// Earlier models accept images as ordinary user parts beside the tool
+	// response. Keep the response last, as required by Gemini turn ordering.
+	return append(images, Part{FunctionResponse: response})
 }
 
 func sanitizeGoogleSchema(v any) any {
@@ -695,6 +697,15 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 				if b, err := json.Marshal(p.FunctionResponse.Response); err == nil {
 					respStr = string(b)
 				}
+				var resultParts []canonical.ContentPart
+				if len(p.FunctionResponse.Parts) > 0 {
+					resultParts = append(resultParts, canonical.ContentPart{Type: canonical.PartText, Text: respStr})
+					for _, part := range p.FunctionResponse.Parts {
+						if part.InlineData != nil {
+							resultParts = append(resultParts, canonical.ContentPart{Type: canonical.PartImage, ImageMediaType: part.InlineData.MimeType, ImageData: part.InlineData.Data})
+						}
+					}
+				}
 				out.Messages = append(out.Messages, canonical.Message{
 					Role: canonical.RoleTool,
 					Parts: []canonical.ContentPart{
@@ -702,6 +713,7 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 							Type:              canonical.PartToolResult,
 							ToolResultID:      resultID,
 							ToolResultContent: respStr,
+							ToolResultParts:   resultParts,
 						},
 					},
 				})

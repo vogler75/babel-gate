@@ -61,7 +61,9 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 
 	// Anthropic Messages API (Claude Code / Anthropic SDK)
 	mux.HandleFunc("/v1/messages", anthropicHandler.HandleMessages)
+	mux.HandleFunc("/v1/messages/count_tokens", anthropicHandler.HandleCountTokens)
 	mux.HandleFunc("/anthropic/v1/messages", anthropicHandler.HandleMessages)
+	mux.HandleFunc("/anthropic/v1/messages/count_tokens", anthropicHandler.HandleCountTokens)
 	mux.HandleFunc("/anthropic/v1/models", anthropicHandler.HandleModels)
 
 	// OpenAI Chat Completions API

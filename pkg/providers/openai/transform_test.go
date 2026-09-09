@@ -9,6 +9,34 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
 
+func TestToolResultImagesFollowAllParallelToolReplies(t *testing.T) {
+	req := &canonical.CanonicalRequest{Model: "test", Messages: []canonical.Message{
+		{Role: canonical.RoleAssistant, Parts: []canonical.ContentPart{
+			{Type: canonical.PartToolCall, ToolCallID: "a", ToolCallName: "screenshot", ToolCallArgs: "{}"},
+			{Type: canonical.PartToolCall, ToolCallID: "b", ToolCallName: "inspect", ToolCallArgs: "{}"},
+		}},
+		{Role: canonical.RoleTool, Parts: []canonical.ContentPart{{Type: canonical.PartToolResult, ToolResultID: "a", ToolResultParts: []canonical.ContentPart{
+			{Type: canonical.PartText, Text: "Screenshot"},
+			{Type: canonical.PartImage, ImageMediaType: "image/png", ImageData: "aW1hZ2U="},
+		}}}},
+		{Role: canonical.RoleTool, Parts: []canonical.ContentPart{{Type: canonical.PartToolResult, ToolResultID: "b", ToolResultContent: "Done"}}},
+	}}
+	wire, err := ToOpenAIRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Messages) != 4 || wire.Messages[1].Role != "tool" || wire.Messages[2].Role != "tool" || wire.Messages[3].Role != "user" {
+		t.Fatalf("images interrupted parallel tool replies: %+v", wire.Messages)
+	}
+	if wire.Messages[1].Content != "Screenshot" {
+		t.Fatal("binary output leaked into tool text")
+	}
+	parts, ok := wire.Messages[3].Content.([]ContentPart)
+	if !ok || len(parts) != 2 || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatal("tool image lost")
+	}
+}
+
 func TestOpenAIBidirectional(t *testing.T) {
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -178,4 +206,3 @@ func TestOpenAIListModelsSDCCatalog(t *testing.T) {
 		}
 	}
 }
-

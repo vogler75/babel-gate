@@ -5,10 +5,52 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
+
+func TestCachedUsageRoundTripAndStreamingCorrections(t *testing.T) {
+	want := Usage{InputTokens: 363, CacheReadInputTokens: 100000, CacheCreationInputTokens: 7137, OutputTokens: 5}
+	response, err := FromAnthropicResponse(&MessageResponse{Usage: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage.PromptTokens != 107500 || response.Usage.TotalTokens != 107505 {
+		t.Fatalf("cached prompt undercounted: %+v", response.Usage)
+	}
+	roundTrip, err := ToAnthropicResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.Usage != want {
+		t.Fatalf("cache double-counted/lost: %+v", roundTrip.Usage)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":100000,"cache_creation_input_tokens":7137}}}`,
+			`data: {"type":"message_delta","usage":{"input_tokens":363,"output_tokens":5}}`,
+			`data: {"type":"message_delta","usage":{"input_tokens":0,"output_tokens":6}}`,
+			`data: {"type":"message_stop"}`,
+		}, "\n\n") + "\n\n"))
+	}))
+	defer srv.Close()
+	stream, err := NewClient("mock", "", srv.URL, nil, srv.Client()).Stream(context.Background(), &canonical.CanonicalRequest{Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var counts []int
+	for event := range stream {
+		if event.Usage != nil {
+			counts = append(counts, event.Usage.PromptTokens)
+		}
+	}
+	if len(counts) != 3 || counts[0] != 107237 || counts[1] != 107500 || counts[2] != 107137 {
+		t.Fatalf("cumulative usage lost omitted fields/explicit zero: %v", counts)
+	}
+}
 
 func TestAnthropicBidirectional(t *testing.T) {
 	req := &MessageRequest{
@@ -281,4 +323,3 @@ func TestThinkingSignaturePreservation(t *testing.T) {
 		t.Errorf("signature not preserved in ToAnthropicRequest: %+v", anthBlocks[0])
 	}
 }
-

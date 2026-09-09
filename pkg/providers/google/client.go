@@ -5,12 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -66,6 +65,26 @@ func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
 	return c.apiKey
 }
 
+func (c *Client) apiError(operation string, statusCode int, body []byte) error {
+	var envelope ErrorResponse
+	_ = json.Unmarshal(body, &envelope)
+	message := strings.TrimSpace(envelope.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	return &providers.APIError{
+		Provider:   c.name,
+		Operation:  operation,
+		StatusCode: statusCode,
+		Code:       envelope.Error.Code,
+		Status:     envelope.Error.Status,
+		Message:    message,
+	}
+}
+
 func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
 	req.Stream = false
 	targetModel := c.cleanModelName(req.Model)
@@ -106,7 +125,7 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("google gemini api error status %d: %s", resp.StatusCode, string(respBody))
+		return nil, c.apiError("generate", resp.StatusCode, respBody)
 	}
 
 	var googleResp GenerateContentResponse
@@ -115,6 +134,73 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 	}
 
 	return FromGoogleResponse(&googleResp, targetModel)
+}
+
+// CountTokens uses Gemini's tokenizer on the fully translated request,
+// including system instructions, multimodal content, and tool declarations.
+func (c *Client) CountTokens(ctx context.Context, req *canonical.CanonicalRequest) (int, error) {
+	targetReq := *req
+	targetReq.Stream = false
+	targetModel := c.cleanModelName(targetReq.Model)
+	googleReq, err := ToGoogleRequest(&targetReq)
+	if err != nil {
+		return 0, fmt.Errorf("transform Google token count request: %w", err)
+	}
+	googleReq.Model = "models/" + targetModel
+	googleReq.GenerationConfig = nil
+	count, err := c.countTokens(ctx, req, targetModel, CountTokensRequest{GenerateContentRequest: googleReq})
+	// Gemini Developer API wraps the prompt in generateContentRequest. Vertex
+	// and gateways backed by Vertex accept the same fields at the top level.
+	// Retry only this specific schema mismatch; never drop system/tools just
+	// to make a count succeed, since that would silently undercount the prompt.
+	var apiErr *providers.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(apiErr.Message, `Unknown name "generateContentRequest"`) {
+		googleReq.Model = ""
+		return c.countTokens(ctx, req, targetModel, googleReq)
+	}
+	return count, err
+}
+
+func (c *Client) countTokens(ctx context.Context, req *canonical.CanonicalRequest, targetModel string, payload any) (int, error) {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("marshal Google token count request: %w", err)
+	}
+	url := fmt.Sprintf("%s/models/%s:countTokens", c.baseURL, targetModel)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return 0, fmt.Errorf("create Google token count request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	apiKey := c.getAPIKey(req)
+	if apiKey != "" {
+		httpReq.Header.Set("x-api-key", apiKey)
+		httpReq.Header.Set("x-goog-api-key", apiKey)
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return 0, fmt.Errorf("Google token count request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read Google token count response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, c.apiError("count tokens", resp.StatusCode, respBody)
+	}
+	var countResp struct {
+		TotalTokens *int `json:"totalTokens"`
+	}
+	if err := json.Unmarshal(respBody, &countResp); err != nil {
+		return 0, fmt.Errorf("unmarshal Google token count response: %w", err)
+	}
+	if countResp.TotalTokens == nil || *countResp.TotalTokens < 0 {
+		return 0, fmt.Errorf("Google token count response is missing a valid totalTokens")
+	}
+	return *countResp.TotalTokens, nil
 }
 
 func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
@@ -154,10 +240,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		_ = os.WriteFile(filepath.Join(os.TempDir(), "last_google_stream_error_payload.json"), bodyBytes, 0644)
-		_ = os.WriteFile(filepath.Join(os.TempDir(), "last_google_stream_error_response.json"), body, 0644)
-		log.Printf("[GOOGLE STREAM ERROR] status %d: %s\nTarget URL: %s\nPayload was: %s", resp.StatusCode, string(body), url, string(bodyBytes))
-		return nil, fmt.Errorf("google gemini stream api error %d: %s", resp.StatusCode, string(body))
+		apiErr := c.apiError("stream", resp.StatusCode, body)
+		log.Printf("[GOOGLE STREAM ERROR] %v (target: %s)", apiErr, url)
+		return nil, apiErr
 	}
 
 	eventChan := make(chan canonical.CanonicalEvent, 64)

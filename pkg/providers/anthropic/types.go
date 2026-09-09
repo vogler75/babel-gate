@@ -1,8 +1,11 @@
 package anthropic
 
-import "github.com/vogler75/babel-gate/pkg/providers/toolnames"
+import (
+	"encoding/json"
 
-import "encoding/json"
+	"github.com/vogler75/babel-gate/pkg/canonical"
+	"github.com/vogler75/babel-gate/pkg/providers/toolnames"
+)
 
 type MessageRequest struct {
 	names         *toolnames.Mapping
@@ -96,8 +99,33 @@ type MessageResponse struct {
 }
 
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+}
+
+func (u Usage) TotalInputTokens() int {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
+func (u Usage) Canonical() canonical.Usage {
+	return canonical.Usage{
+		PromptTokens:             u.TotalInputTokens(),
+		CompletionTokens:         u.OutputTokens,
+		TotalTokens:              u.TotalInputTokens() + u.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+	}
+}
+
+func FromCanonicalUsage(u canonical.Usage) Usage {
+	return Usage{
+		InputTokens:              u.PromptTokens - u.CacheReadInputTokens - u.CacheCreationInputTokens,
+		OutputTokens:             u.CompletionTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+	}
 }
 
 // Streaming event structures

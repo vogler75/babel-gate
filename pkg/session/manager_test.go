@@ -75,6 +75,9 @@ func TestSessionManagerRecordRequestAndSummary(t *testing.T) {
 	if sess.InputTokens != 170 {
 		t.Errorf("expected 170 input tokens, got %d", sess.InputTokens)
 	}
+	if sess.ContextTokens != 50 {
+		t.Errorf("expected latest context size of 50 tokens, got %d", sess.ContextTokens)
+	}
 	if sess.OutputTokens != 110 {
 		t.Errorf("expected 110 output tokens, got %d", sess.OutputTokens)
 	}
@@ -119,6 +122,22 @@ func TestSessionManagerRecordRequestAndSummary(t *testing.T) {
 	cleanSummary := mgr.GetSummary()
 	if cleanSummary.TotalTokens != 0 {
 		t.Errorf("expected 0 total tokens after Clear()")
+	}
+}
+
+func TestContextTracksLatestRequestIncludingEstimatesAndCompaction(t *testing.T) {
+	mgr := NewManager()
+	sess := mgr.GetOrCreate("sess-context", "127.0.0.1", "test-agent", "TestClient")
+	for _, rec := range []RequestRecord{
+		{InputTokens: 1000000, Status: "success"},
+		{InputTokens: 400000, InputTokensEstimated: true, Status: "error"},
+		{InputTokens: 20000, Status: "success"},
+	} {
+		mgr.RecordRequest(sess.ID, rec)
+		got := mgr.ListSessions()[0]
+		if got.ContextTokens != rec.InputTokens || got.ContextTokensEstimated != rec.InputTokensEstimated {
+			t.Fatalf("context measurement lost: %+v", got)
+		}
 	}
 }
 
