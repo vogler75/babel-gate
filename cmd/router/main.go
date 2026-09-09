@@ -18,6 +18,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/providers/copilot"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/server"
+	"github.com/vogler75/babel-gate/pkg/tray"
 	"github.com/vogler75/babel-gate/pkg/tui"
 )
 
@@ -28,10 +29,16 @@ func main() {
 	background := flag.Bool("background", false, "Run in background/daemon mode (no TUI, logs to rotating file)")
 	flag.BoolVar(background, "d", false, "Alias for -background")
 	noTUI := flag.Bool("no-tui", false, "Disable text GUI and run with standard console logging")
+	trayMode := flag.Bool("tray", false, "Run in background with a system tray icon (Windows only; implies -background)")
 	logFileFlag := flag.String("log-file", "", "Path to log file (default from config or logs/babelgate.log)")
 	logMaxSizeFlag := flag.Int("log-max-size-mb", 0, "Max size in MB before log rotation (default: 10)")
 	logMaxBackupsFlag := flag.Int("log-max-backups", -1, "Number of rotated log backups to keep (default: 5)")
 	flag.Parse()
+
+	// The tray is a background UI: no TUI, logs to the rotating file.
+	if *trayMode {
+		*background = true
+	}
 
 	if *copilotLogin {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -125,6 +132,12 @@ func main() {
 		// Background daemon: output exclusively to rotating log file
 		log.SetOutput(rotator)
 		log.Printf("BabelGate running in background mode (logs: %s, port: %d)", cfg.Logging.File, cfg.Server.Port)
+		// Now that logs go to a file, drop the console window that Windows
+		// gives us when launched from Explorer. Done here rather than earlier
+		// so config and log-file errors above are still visible on screen.
+		if *trayMode {
+			tray.HideConsole()
+		}
 	} else {
 		// Headless / non-tty console: output to both stdout and rotating log file
 		mw := logger.NewMultiWriterWithRing(rotator, nil)
@@ -223,7 +236,27 @@ func main() {
 			tuiCancel()
 		}()
 		_ = appTUI.Run(tuiCtx)
+	} else if *trayMode && tray.Supported() {
+		trayCtx, trayCancel := context.WithCancel(context.Background())
+		go func() {
+			<-stop
+			trayCancel()
+		}()
+		base := fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
+		log.Printf("Tray icon active (dashboard: %s/)", base)
+		if err := tray.Run(trayCtx, tray.Options{
+			Tooltip:      fmt.Sprintf("BabelGate - port %d", cfg.Server.Port),
+			DashboardURL: base + "/",
+			SetupURL:     base + "/setup",
+			OnQuit:       trayCancel,
+		}); err != nil {
+			log.Printf("Tray unavailable (%v); waiting for termination signal instead", err)
+			<-stop
+		}
 	} else {
+		if *trayMode {
+			log.Printf("Tray not supported on this platform; running in background mode")
+		}
 		<-stop
 	}
 

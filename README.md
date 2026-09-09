@@ -28,6 +28,7 @@
   - [3. Claude Code with Local / Enterprise LLMs (Ollama, vLLM, DeepSeek)](#3-claude-code-with-local--enterprise-llms-ollama-vllm-deepseek)
   - [4. OpenAI SDK (Python & Node) to Claude or Gemini](#4-openai-sdk-python--node-to-claude-or-gemini)
   - [5. Google GenAI SDK / cURL to OpenAI or Claude](#5-google-genai-sdk--curl-to-openai-or-claude)
+- [Running in the Background](#running-in-the-background)
 - [GitHub Copilot Authentication](#github-copilot-authentication)
 - [Web Dashboard & Playground](#web-dashboard--playground)
 - [Configuration Reference](#configuration-reference)
@@ -334,6 +335,40 @@ curl -X POST "http://localhost:8080/v1beta/models/openai/gpt-4o:generateContent"
 
 ---
 
+## Running in the Background
+
+By default `babelgate` renders an interactive terminal UI. For long-running use there are two headless modes:
+
+| Flag | Behaviour |
+| :--- | :--- |
+| `-background`, `-d` | No terminal UI. Logs go exclusively to the rotating log file. |
+| `-no-tui` | No terminal UI, but keeps logging to the console (useful for Docker, systemd, CI). |
+| `-tray` | **Windows only.** Implies `-background` and adds a system tray icon. |
+
+### Windows System Tray
+
+```powershell
+.\bin\babelgate.exe -tray
+```
+
+BabelGate places an icon in the notification area. Right-click (or left-click) it for a menu:
+
+- **Open Dashboard** — opens `http://localhost:<port>/` in your default browser
+- **Open Setup** — opens the provider configuration page
+- **Quit BabelGate** — shuts the gateway down gracefully
+
+Double-clicking the icon opens the dashboard directly. The icon is restored automatically if Explorer restarts.
+
+When launched from Explorer or a shortcut, the console window is closed once startup succeeds — so nothing lingers on screen. Startup failures (a bad config, an unwritable log file) are still printed before the console goes away. Launching from an existing terminal leaves that terminal alone.
+
+> [!TIP]
+> To start BabelGate with Windows, put a shortcut to `babelgate.exe -tray` in
+> `shell:startup` (press <kbd>Win</kbd>+<kbd>R</kbd>, type `shell:startup`).
+
+On macOS and Linux `-tray` is accepted but degrades to plain `-background`, with a note in the log. There is no menu bar / app indicator implementation.
+
+---
+
 ## GitHub Copilot Authentication
 
 GitHub Copilot can be authenticated through three convenient methods:
@@ -480,7 +515,8 @@ babelgate/
 │   ├── providers/      # Upstream drivers (Anthropic, Copilot, Google, OpenAI)
 │   ├── router/         # Model catalog, alias routing & fallback engine
 │   ├── server/         # Inbound HTTP protocol handlers & SSE multiplexers
-│   └── session/        # Live session tracking, client fingerprinting & metrics
+│   ├── session/        # Live session tracking, client fingerprinting & metrics
+│   └── tray/           # Windows system tray icon for background mode
 ├── Makefile            # Build and test shortcuts
 ├── config.example.yaml # Annotated configuration template
 └── README.md
