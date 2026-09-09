@@ -305,15 +305,16 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       true,
-			DurationMs:   time.Since(startTime).Milliseconds(),
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       streamStatus,
-			ErrorMessage: streamErr,
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               true,
+			DurationMs:           time.Since(startTime).Milliseconds(),
+			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+			InputTokens:          inTokens,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               streamStatus,
+			ErrorMessage:         streamErr,
 		})
 	}
 }

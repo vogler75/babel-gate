@@ -3,7 +3,9 @@ package inbound
 import (
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
 
@@ -31,6 +33,15 @@ func ExtractSessionID(r *http.Request) string {
 		return s
 	}
 	return ""
+}
+
+func generationDurationMs(tr *trace.RequestTrace, fallback time.Duration) int64 {
+	if tr != nil {
+		if duration := tr.GenerationDuration(); duration > 0 {
+			return duration.Milliseconds()
+		}
+	}
+	return fallback.Milliseconds()
 }
 
 // ExtractClientIP retrieves the client IP address from request headers or RemoteAddr.

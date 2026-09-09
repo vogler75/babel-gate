@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +16,48 @@ func TestExpandEnv(t *testing.T) {
 	expected := "api_key: secret_123\nother: secret_123\nplain: unchanged"
 	if got != expected {
 		t.Errorf("expected:\n%s\ngot:\n%s", expected, got)
+	}
+}
+
+func TestProviderEnabledDefaultsToTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  openai:\n    type: openai\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Providers["openai"].IsEnabled() {
+		t.Fatal("provider without enabled field should remain enabled")
+	}
+}
+
+func TestUpdateProviderEnabledPreservesEnvironmentReference(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	original := "# keep this comment\nproviders:\n  openai:\n    type: openai\n    api_key: ${OPENAI_API_KEY}\n"
+	if err := os.WriteFile(path, []byte(original), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateProviderEnabled(path, "openai", false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "enabled: false") || !strings.Contains(text, "${OPENAI_API_KEY}") || !strings.Contains(text, "# keep this comment") {
+		t.Fatalf("unexpected updated config:\n%s", text)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("expected mode 0640, got %o", info.Mode().Perm())
 	}
 }
 

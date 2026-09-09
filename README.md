@@ -363,10 +363,12 @@ GitHub Copilot can be authenticated through three convenient methods:
 
 `babelgate` includes an embedded dark-themed web console available at **`http://localhost:8080/`**:
 
-- **Active Provider Status**: Real-time health, priority levels, and endpoint configurations.
+- **Live Provider Controls**: Enable or disable configured providers without restarting from either the web dashboard or TUI; changes are written back to the active YAML file. In the TUI, use `Tab`/`Shift-Tab` to focus Providers, Sessions, or Logs, `↑`/`↓` to select or scroll within the focused pane, and `Space` to toggle the selected provider.
+- **Visual Route Editor**: Configure the default route, aliases, and fallback chains from the dashboard.
 - **Unified Model Catalog**: Interactive table of all upstream and aliased models.
 - **Streaming Prompt Playground**: Test any connected model with live token streaming and duration metrics directly in your browser.
 - **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), request counts, input/output token usage, duration, and error logs.
+- **Generation Throughput**: Compare output tokens per second for each completed request and session. Streaming throughput excludes time-to-first-token.
 - **Setup & Client Integration Guide**: Step-by-step guides and configuration snippets at `/setup` for Claude Code, Codex CLI, Antigravity CLI, OpenAI SDK, Gemini SDK, and GitHub Copilot.
 
 ---
@@ -387,6 +389,7 @@ server:
 providers:
   google:
     type: google           # "google", "anthropic", "openai", "copilot"
+    enabled: true          # Optional; defaults to true when omitted
     api_key: "${GEMINI_API_KEY}"
     priority: 1            # Priority for default selection (lower = higher priority)
 
@@ -428,6 +431,8 @@ routing:
 |---|:---:|---|---|
 | `/` | `GET` | HTML / Web | Embedded Web Dashboard & Playground |
 | `/setup` | `GET` | HTML / Web | Client Setup Guide & Integration Snippets |
+| `/api/providers/{name}` | `PUT` | JSON | Enable or disable a provider live (`{"enabled":true}`) |
+| `/api/routing` | `GET`, `PUT` | JSON | Read or replace live default, alias, and fallback routing |
 | `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
 | `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
 | `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |

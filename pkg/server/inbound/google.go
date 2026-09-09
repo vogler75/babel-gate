@@ -187,13 +187,14 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-				Provider:     prov,
-				Model:        trackingModel,
-				Stream:       true,
-				DurationMs:   time.Since(startTime).Milliseconds(),
-				InputTokens:  estInTokens,
-				Status:       "error",
-				ErrorMessage: err.Error(),
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               true,
+				DurationMs:           time.Since(startTime).Milliseconds(),
+				GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+				InputTokens:          estInTokens,
+				Status:               "error",
+				ErrorMessage:         err.Error(),
 			})
 		}
 		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
@@ -330,15 +331,16 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       true,
-			DurationMs:   time.Since(startTime).Milliseconds(),
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       streamStatus,
-			ErrorMessage: streamErr,
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               true,
+			DurationMs:           time.Since(startTime).Milliseconds(),
+			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+			InputTokens:          inTokens,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               streamStatus,
+			ErrorMessage:         streamErr,
 		})
 	}
 }

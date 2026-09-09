@@ -37,21 +37,12 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	}
 
 	for name, pcfg := range cfg.Providers {
-		switch strings.ToLower(pcfg.Type) {
-		case "openai":
-			client := openai.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil)
-			e.providers[name] = client
-		case "anthropic":
-			client := anthropic.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil)
-			e.providers[name] = client
-		case "google":
-			client := google.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil)
-			e.providers[name] = client
-		case "copilot", "github-copilot":
-			client := copilot.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil)
-			e.providers[name] = client
-		default:
-			return nil, fmt.Errorf("unsupported provider type %q for provider %q", pcfg.Type, name)
+		provider, err := buildProvider(name, pcfg)
+		if err != nil {
+			return nil, err
+		}
+		if pcfg.IsEnabled() {
+			e.providers[name] = provider
 		}
 
 		if len(pcfg.EnabledModels) > 0 {
@@ -63,6 +54,21 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	}
 
 	return e, nil
+}
+
+func buildProvider(name string, pcfg config.ProviderConfig) (providers.Provider, error) {
+	switch strings.ToLower(pcfg.Type) {
+	case "openai":
+		return openai.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
+	case "anthropic":
+		return anthropic.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
+	case "google":
+		return google.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
+	case "copilot", "github-copilot":
+		return copilot.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
+	default:
+		return nil, fmt.Errorf("unsupported provider type %q for provider %q", pcfg.Type, name)
+	}
 }
 
 // RegisterProvider dynamically registers or replaces a provider.
@@ -211,6 +217,7 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 				TargetModel: modelName,
 			}, nil
 		}
+		return nil, fmt.Errorf("provider %q is disabled or not configured", providerName)
 	}
 
 	// 3. Priority-based model lookup: check priority 1, then priority 2, etc.
@@ -255,6 +262,7 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 			if p, ok := e.providers[pName]; ok {
 				return &ResolvedRoute{Provider: p, TargetModel: mName}, nil
 			}
+			return nil, fmt.Errorf("default route provider %q is disabled or not configured", pName)
 		}
 		for _, p := range e.providers {
 			return &ResolvedRoute{Provider: p, TargetModel: def}, nil
@@ -398,4 +406,138 @@ func (e *Engine) GetRoutes() map[string]string {
 		res[k] = v
 	}
 	return res
+}
+
+// ProviderState is the dashboard-safe view of a configured provider.
+type ProviderState struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Priority int    `json:"priority"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// GetProviderStates returns both enabled and disabled configured providers.
+func (e *Engine) GetProviderStates() []ProviderState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	states := make([]ProviderState, 0, len(e.cfg.Providers))
+	for name, pcfg := range e.cfg.Providers {
+		priority := pcfg.Priority
+		if priority <= 0 {
+			priority = 100
+		}
+		_, active := e.providers[name]
+		states = append(states, ProviderState{Name: name, Type: pcfg.Type, Priority: priority, Enabled: active})
+	}
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].Priority != states[j].Priority {
+			return states[i].Priority < states[j].Priority
+		}
+		return states[i].Name < states[j].Name
+	})
+	return states
+}
+
+// SetProviderEnabled applies a provider state immediately and, when a source
+// config exists, persists it before changing the running engine.
+func (e *Engine) SetProviderEnabled(name string, enabled bool) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	pcfg, ok := e.cfg.Providers[name]
+	if !ok {
+		return false, fmt.Errorf("provider %q is not configured", name)
+	}
+	persisted := e.cfg.SourcePath != ""
+	if persisted {
+		if err := config.UpdateProviderEnabled(e.cfg.SourcePath, name, enabled); err != nil {
+			return false, err
+		}
+	}
+	if enabled {
+		provider, err := buildProvider(name, pcfg)
+		if err != nil {
+			return false, err
+		}
+		e.providers[name] = provider
+	} else {
+		delete(e.providers, name)
+	}
+	pcfg.Enabled = new(bool)
+	*pcfg.Enabled = enabled
+	e.cfg.Providers[name] = pcfg
+	return persisted, nil
+}
+
+// GetRouting returns a copy of all mutable routing configuration.
+func (e *Engine) GetRouting() config.RoutingConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneRouting(e.cfg.Routing)
+}
+
+// SetRouting atomically persists and activates a complete routing definition.
+func (e *Engine) SetRouting(routing config.RoutingConfig) (bool, error) {
+	if err := validateRouting(routing); err != nil {
+		return false, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	targets := make([]string, 0, len(routing.Routes)+1)
+	if routing.Default != "" {
+		targets = append(targets, routing.Default)
+	}
+	for _, target := range routing.Routes {
+		targets = append(targets, target)
+	}
+	for _, fallbacks := range routing.Fallbacks {
+		targets = append(targets, fallbacks...)
+	}
+	for _, target := range targets {
+		if slash := strings.Index(target, "/"); slash > 0 {
+			if _, ok := e.cfg.Providers[target[:slash]]; !ok {
+				return false, fmt.Errorf("route target references unknown provider %q", target[:slash])
+			}
+		}
+	}
+	persisted := e.cfg.SourcePath != ""
+	if persisted {
+		if err := config.UpdateRouting(e.cfg.SourcePath, routing); err != nil {
+			return false, err
+		}
+	}
+	e.cfg.Routing = cloneRouting(routing)
+	return persisted, nil
+}
+
+func validateRouting(routing config.RoutingConfig) error {
+	for alias, target := range routing.Routes {
+		if strings.TrimSpace(alias) == "" || strings.TrimSpace(target) == "" {
+			return fmt.Errorf("route aliases and targets cannot be empty")
+		}
+		if alias == target {
+			return fmt.Errorf("route %q cannot target itself", alias)
+		}
+	}
+	for model, fallbacks := range routing.Fallbacks {
+		if strings.TrimSpace(model) == "" {
+			return fmt.Errorf("fallback model cannot be empty")
+		}
+		for _, target := range fallbacks {
+			if strings.TrimSpace(target) == "" {
+				return fmt.Errorf("fallback targets cannot be empty")
+			}
+		}
+	}
+	return nil
+}
+
+func cloneRouting(in config.RoutingConfig) config.RoutingConfig {
+	out := config.RoutingConfig{Default: in.Default, Routes: make(map[string]string), Fallbacks: make(map[string][]string)}
+	for key, value := range in.Routes {
+		out.Routes[key] = value
+	}
+	for key, values := range in.Fallbacks {
+		out.Fallbacks[key] = append([]string(nil), values...)
+	}
+	return out
 }

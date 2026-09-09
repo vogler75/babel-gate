@@ -22,7 +22,8 @@ type ServerConfig struct {
 
 // ProviderConfig defines configuration for an upstream LLM provider.
 type ProviderConfig struct {
-	Type          string   `yaml:"type"` // "openai", "anthropic", "google", "copilot"
+	Type          string   `yaml:"type"`              // "openai", "anthropic", "google", "copilot"
+	Enabled       *bool    `yaml:"enabled,omitempty"` // nil preserves backward compatibility and means enabled
 	APIKey        string   `yaml:"api_key"`
 	BaseURL       string   `yaml:"base_url"`
 	EnabledModels []string `yaml:"enabled_models"`
@@ -32,15 +33,15 @@ type ProviderConfig struct {
 
 // RoutingConfig defines model aliasing and routing rules.
 type RoutingConfig struct {
-	Default   string              `yaml:"default"`
-	Routes    map[string]string   `yaml:"routes"`
-	Fallbacks map[string][]string `yaml:"fallbacks"`
+	Default   string              `yaml:"default" json:"default"`
+	Routes    map[string]string   `yaml:"routes" json:"routes"`
+	Fallbacks map[string][]string `yaml:"fallbacks" json:"fallbacks"`
 }
 
 // DatabaseConfig defines settings for persistent metrics storage.
 type DatabaseConfig struct {
 	Path          string `yaml:"path"`           // Path to SQLite database, defaults to "data/metrics.db"
-	RetentionDays int    `yaml:"retention_days"`  // Days to keep metrics, defaults to 90 (0 = keep forever)
+	RetentionDays int    `yaml:"retention_days"` // Days to keep metrics, defaults to 90 (0 = keep forever)
 }
 
 // LoggingConfig defines settings for rotating log files.
@@ -52,11 +53,18 @@ type LoggingConfig struct {
 
 // Config is the top-level configuration structure.
 type Config struct {
-	Server    ServerConfig              `yaml:"server"`
-	Providers map[string]ProviderConfig `yaml:"providers"`
-	Routing   RoutingConfig             `yaml:"routing"`
-	Database  DatabaseConfig            `yaml:"database"`
-	Logging   LoggingConfig             `yaml:"logging"`
+	Server     ServerConfig              `yaml:"server"`
+	Providers  map[string]ProviderConfig `yaml:"providers"`
+	Routing    RoutingConfig             `yaml:"routing"`
+	Database   DatabaseConfig            `yaml:"database"`
+	Logging    LoggingConfig             `yaml:"logging"`
+	SourcePath string                    `yaml:"-"`
+}
+
+// IsEnabled reports whether the provider may receive traffic. Providers that
+// predate the enabled setting remain enabled when the field is omitted.
+func (p ProviderConfig) IsEnabled() bool {
+	return p.Enabled == nil || *p.Enabled
 }
 
 var envRegex = regexp.MustCompile(`\$\{([a-zA-Z_0-9]+)\}|\$([a-zA-Z_0-9]+)`)
@@ -121,6 +129,7 @@ func Load(path string) (*Config, error) {
 			MaxBackups: 5,
 		},
 	}
+	cfg.SourcePath = path
 
 	if path != "" {
 		data, err := os.ReadFile(path)

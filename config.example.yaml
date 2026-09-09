@@ -22,6 +22,7 @@ database:
 providers:
   google:
     type: google
+    enabled: true
     api_key: "${GEMINI_API_KEY}"
     # Optional: custom base URL
     # base_url: "https://generativelanguage.googleapis.com/v1beta"
@@ -32,17 +33,20 @@ providers:
 
   anthropic:
     type: anthropic
+    enabled: true
     api_key: "${ANTHROPIC_API_KEY}"
     # base_url: "https://api.anthropic.com/v1"
 
   openai:
     type: openai
+    enabled: true
     api_key: "${OPENAI_API_KEY}"
     # base_url: "https://api.openai.com/v1"
 
   # GitHub Copilot (uses device login, local ~/.config/github-copilot, or GITHUB_TOKEN)
   copilot:
     type: copilot
+    enabled: true
     # api_key is optional if authenticated via:
     # 1. Device login: ./bin/babelgate -copilot-login
     # 2. Existing VS Code / JetBrains login in ~/.config/github-copilot/apps.json
@@ -55,4 +59,3 @@ providers:
 #     "fast": "google/gemini-2.5-flash"
 #     "smart": "copilot/gpt-4o"
 #     "claude-3-7-sonnet": "copilot/gpt-4o"
-

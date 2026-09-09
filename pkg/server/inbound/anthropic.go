@@ -355,14 +355,15 @@ func (h *AnthropicHandler) handlePassthrough(
 		prov := anthClient.Name()
 		trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       req.Stream,
-			DurationMs:   time.Since(startTime).Milliseconds(),
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  totalTokens,
-			Status:       status,
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               req.Stream,
+			DurationMs:           time.Since(startTime).Milliseconds(),
+			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+			InputTokens:          inTokens,
+			OutputTokens:         outTokens,
+			TotalTokens:          totalTokens,
+			Status:               status,
 		})
 	}
 }
@@ -655,15 +656,16 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:     prov,
-			Model:        trackingModel,
-			Stream:       true,
-			DurationMs:   time.Since(startTime).Milliseconds(),
-			InputTokens:  inTokens,
-			OutputTokens: outTokens,
-			TotalTokens:  inTokens + outTokens,
-			Status:       streamStatus,
-			ErrorMessage: streamErr,
+			Provider:             prov,
+			Model:                trackingModel,
+			Stream:               true,
+			DurationMs:           time.Since(startTime).Milliseconds(),
+			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+			InputTokens:          inTokens,
+			OutputTokens:         outTokens,
+			TotalTokens:          inTokens + outTokens,
+			Status:               streamStatus,
+			ErrorMessage:         streamErr,
 		})
 	}
 }

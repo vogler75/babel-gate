@@ -20,33 +20,38 @@ type MetricsRecorder interface {
 
 // RequestRecord captures details of an individual LLM request within a session.
 type RequestRecord struct {
-	ID           string    `json:"id"`
-	Timestamp    time.Time `json:"timestamp"`
-	Provider     string    `json:"provider,omitempty"`
-	Model        string    `json:"model"`
-	Stream       bool      `json:"stream"`
-	DurationMs   int64     `json:"duration_ms"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	TotalTokens  int       `json:"total_tokens"`
-	Status       string    `json:"status"` // "success" or "error"
-	ErrorMessage string    `json:"error_message,omitempty"`
+	ID                   string    `json:"id"`
+	Timestamp            time.Time `json:"timestamp"`
+	Provider             string    `json:"provider,omitempty"`
+	Model                string    `json:"model"`
+	Stream               bool      `json:"stream"`
+	DurationMs           int64     `json:"duration_ms"`
+	GenerationDurationMs int64     `json:"generation_duration_ms"`
+	InputTokens          int       `json:"input_tokens"`
+	OutputTokens         int       `json:"output_tokens"`
+	TotalTokens          int       `json:"total_tokens"`
+	TokensPerSecond      float64   `json:"tokens_per_second"`
+	Status               string    `json:"status"` // "success" or "error"
+	ErrorMessage         string    `json:"error_message,omitempty"`
 }
 
 // Session tracks an ongoing client conversation/session and its aggregated token usage.
 type Session struct {
-	ID             string          `json:"id"`
-	Client         string          `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
-	ClientIP       string          `json:"client_ip,omitempty"`
-	UserAgent      string          `json:"user_agent,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	LastActive     time.Time       `json:"last_active"`
-	RequestCount   int             `json:"request_count"`
-	InputTokens    int             `json:"input_tokens"`
-	OutputTokens   int             `json:"output_tokens"`
-	TotalTokens    int             `json:"total_tokens"`
-	Models         []string        `json:"models"`
-	RecentRequests []RequestRecord `json:"recent_requests,omitempty"`
+	ID                   string    `json:"id"`
+	Client               string    `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
+	ClientIP             string    `json:"client_ip,omitempty"`
+	UserAgent            string    `json:"user_agent,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	LastActive           time.Time `json:"last_active"`
+	RequestCount         int       `json:"request_count"`
+	InputTokens          int       `json:"input_tokens"`
+	OutputTokens         int       `json:"output_tokens"`
+	TotalTokens          int       `json:"total_tokens"`
+	TokensPerSecond      float64   `json:"tokens_per_second"`
+	generationDurationMs int64
+	measuredOutputTokens int
+	Models               []string        `json:"models"`
+	RecentRequests       []RequestRecord `json:"recent_requests,omitempty"`
 }
 
 // Summary provides aggregate metrics across all tracked sessions.
@@ -204,6 +209,13 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	if rec.TotalTokens == 0 {
 		rec.TotalTokens = rec.InputTokens + rec.OutputTokens
 	}
+	generationDurationMs := rec.GenerationDurationMs
+	if generationDurationMs <= 0 {
+		generationDurationMs = rec.DurationMs
+	}
+	if rec.OutputTokens > 0 && generationDurationMs > 0 {
+		rec.TokensPerSecond = float64(rec.OutputTokens) * 1000 / float64(generationDurationMs)
+	}
 
 	// Always ensure the model name is prefixed with the provider name for tracking and stats
 	if rec.Provider != "" && rec.Provider != "unknown" && rec.Model != "" {
@@ -232,6 +244,11 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	s.InputTokens += rec.InputTokens
 	s.OutputTokens += rec.OutputTokens
 	s.TotalTokens += rec.TotalTokens
+	if rec.OutputTokens > 0 && generationDurationMs > 0 {
+		s.generationDurationMs += generationDurationMs
+		s.measuredOutputTokens += rec.OutputTokens
+		s.TokensPerSecond = float64(s.measuredOutputTokens) * 1000 / float64(s.generationDurationMs)
+	}
 
 	// Track model if not already present
 	if rec.Model != "" {

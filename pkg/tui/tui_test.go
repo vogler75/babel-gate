@@ -3,6 +3,11 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/vogler75/babel-gate/pkg/config"
+	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/server"
+	"github.com/vogler75/babel-gate/pkg/session"
 )
 
 func TestStripANSI(t *testing.T) {
@@ -10,6 +15,81 @@ func TestStripANSI(t *testing.T) {
 	plain := stripANSI(colored)
 	if plain != "hello world" {
 		t.Errorf("expected 'hello world', got %q", plain)
+	}
+}
+
+func TestProviderSelectionAndToggle(t *testing.T) {
+	engine, err := router.NewEngine(&config.Config{Providers: map[string]config.ProviderConfig{
+		"openai": {Type: "openai"},
+		"google": {Type: "google"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &TUI{engine: engine, stopChan: make(chan struct{})}
+	states := engine.GetProviderStates()
+	if len(states) != 2 || !states[0].Enabled {
+		t.Fatalf("unexpected initial provider states: %+v", states)
+	}
+
+	app.handleKey(" ")
+	states = engine.GetProviderStates()
+	if states[0].Enabled {
+		t.Fatalf("space should disable selected provider: %+v", states)
+	}
+	lines := app.getSortedProvidersInfo()
+	if len(lines) != 2 || !strings.Contains(stripANSI(lines[0]), "Disabled") {
+		t.Fatalf("disabled provider not shown in TUI: %q", lines)
+	}
+
+	app.handleKey("down")
+	if app.providerSelection != 1 {
+		t.Fatalf("down should select next provider, got %d", app.providerSelection)
+	}
+	app.handleKey("\t")
+	if app.activePane != paneSessions {
+		t.Fatalf("tab should focus sessions, got pane %d", app.activePane)
+	}
+	app.handleKey("\t")
+	if app.activePane != paneLogs {
+		t.Fatalf("second tab should focus logs, got pane %d", app.activePane)
+	}
+	app.handleKey("backtab")
+	if app.activePane != paneSessions {
+		t.Fatalf("shift-tab should focus previous pane, got pane %d", app.activePane)
+	}
+}
+
+func TestSessionsViewShowsTokenSpeed(t *testing.T) {
+	cfg := &config.Config{Database: config.DatabaseConfig{Path: t.TempDir() + "/metrics.db"}}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := server.NewServer(cfg, engine)
+	defer srv.Metrics().Close()
+	sess := srv.Sessions().GetOrCreate("session-1", "127.0.0.1", "test", "Test Client")
+	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
+		Model: "test-model", DurationMs: 2000, GenerationDurationMs: 1000,
+		OutputTokens: 25, TotalTokens: 25, Status: "success",
+	})
+	second := srv.Sessions().GetOrCreate("session-2", "127.0.0.2", "test", "Other Client")
+	srv.Sessions().RecordRequest(second.ID, session.RequestRecord{
+		Model: "other-model", DurationMs: 1000, OutputTokens: 10, TotalTokens: 10, Status: "success",
+	})
+
+	app := New(srv, engine, nil)
+	app.handleKey("\t")
+	if app.activePane != paneSessions {
+		t.Fatal("tab should focus the sessions pane")
+	}
+	lines := app.getSessionsInfo(8)
+	if len(lines) != 2 || !strings.Contains(stripANSI(strings.Join(lines, "\n")), "25.0 tok/s") {
+		t.Fatalf("session token speed not rendered: %q", lines)
+	}
+	app.handleKey("down")
+	if app.sessionSelection != 1 {
+		t.Fatalf("down should select the next session, got %d", app.sessionSelection)
 	}
 }
 
@@ -80,7 +160,7 @@ func TestColorizeLogLine(t *testing.T) {
 
 func TestSliceLogLine(t *testing.T) {
 	plain := "1234567890abcdef"
-	
+
 	// hScroll = 0
 	res0 := sliceLogLine(plain, 0, 10)
 	if visualWidth(res0) > 10 {
@@ -122,6 +202,7 @@ func TestHorizontalScrollKeyHandling(t *testing.T) {
 		scrollPos:  0,
 		hScrollPos: 0,
 		stopChan:   make(chan struct{}),
+		activePane: paneLogs,
 	}
 
 	// Scroll right with right arrow
@@ -163,5 +244,14 @@ func TestHorizontalScrollKeyHandling(t *testing.T) {
 	app.handleKey("0")
 	if app.hScrollPos != 0 {
 		t.Errorf("expected hScrollPos reset to 0, got %d", app.hScrollPos)
+	}
+
+	app.handleKey("up")
+	if app.scrollPos != 1 || app.autoScroll {
+		t.Fatalf("up in logs should pause and scroll, pos=%d auto=%v", app.scrollPos, app.autoScroll)
+	}
+	app.handleKey("down")
+	if app.scrollPos != 0 || !app.autoScroll {
+		t.Fatalf("down at log bottom should restore auto-scroll, pos=%d auto=%v", app.scrollPos, app.autoScroll)
 	}
 }

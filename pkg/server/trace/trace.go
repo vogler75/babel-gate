@@ -114,6 +114,17 @@ func (t *RequestTrace) MarkStreamDone() {
 	t.done = true
 }
 
+// GenerationDuration returns the measured token-generation interval for a
+// streaming response, excluding time-to-first-token.
+func (t *RequestTrace) GenerationDuration() time.Duration {
+	if t == nil {
+		return 0
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.StreamDuration
+}
+
 // SetUpstreamDuration records the duration of a non-streaming upstream execution.
 func (t *RequestTrace) SetUpstreamDuration(d time.Duration) {
 	if t == nil {

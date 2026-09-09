@@ -129,6 +129,34 @@ func TestResolveModel(t *testing.T) {
 	}
 }
 
+func TestDisabledProviderCanBeEnabledLive(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
+		"openai": {Type: "openai", Enabled: &disabled, EnabledModels: []string{"gpt-4o"}},
+	}}
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.GetProviders()) != 0 {
+		t.Fatal("disabled provider was registered")
+	}
+	if _, err := engine.ResolveModel("openai/gpt-4o"); err == nil {
+		t.Fatal("explicit route to disabled provider should fail")
+	}
+	persisted, err := engine.SetProviderEnabled("openai", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
+		t.Fatal("in-memory configuration should not report persistence")
+	}
+	route, err := engine.ResolveModel("openai/gpt-4o")
+	if err != nil || route.Provider.Name() != "openai" {
+		t.Fatalf("provider was not enabled live: route=%v err=%v", route, err)
+	}
+}
+
 func TestCatalogList(t *testing.T) {
 	cfg := &config.Config{
 		Routing: config.RoutingConfig{
@@ -265,16 +293,16 @@ func TestPriorityBasedModelResolution(t *testing.T) {
 	}
 
 	mockP1 := &mockProvider{
-		name:   "google-primary",
-		pType:  "google",
+		name:  "google-primary",
+		pType: "google",
 		models: []providers.ModelInfo{
 			{ID: "gemini-2.5-flash-lite", Name: "Gemini 2.5 Flash Lite"},
 			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
 		},
 	}
 	mockP2 := &mockProvider{
-		name:   "copilot-secondary",
-		pType:  "copilot",
+		name:  "copilot-secondary",
+		pType: "copilot",
 		models: []providers.ModelInfo{
 			{ID: "gemini-2.5-flash-lite", Name: "Gemini 2.5 Flash Lite"},
 			{ID: "gpt-4o", Name: "GPT-4o"},
@@ -406,7 +434,7 @@ func TestCatalogDuplicateModelAcrossProviders(t *testing.T) {
 func TestResolveTrackingModel(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{
-			"google-primary": {Type: "google", Priority: 1},
+			"google-primary":    {Type: "google", Priority: 1},
 			"copilot-secondary": {Type: "copilot", Priority: 2},
 		},
 		Routing: config.RoutingConfig{
@@ -466,5 +494,3 @@ func TestResolveTrackingModel(t *testing.T) {
 		t.Errorf("expected google-primary and google-primary/gemini-2.5-flash, got %q, %q", prov4, track4)
 	}
 }
-
-

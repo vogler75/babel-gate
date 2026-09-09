@@ -44,12 +44,13 @@ func TestSessionManagerRecordRequestAndSummary(t *testing.T) {
 
 	// Record request 1
 	mgr.RecordRequest(s.ID, RequestRecord{
-		Model:        "google/gemini-2.5-pro",
-		Stream:       true,
-		DurationMs:   250,
-		InputTokens:  120,
-		OutputTokens: 80,
-		Status:       "success",
+		Model:                "google/gemini-2.5-pro",
+		Stream:               true,
+		DurationMs:           250,
+		GenerationDurationMs: 200,
+		InputTokens:          120,
+		OutputTokens:         80,
+		Status:               "success",
 	})
 
 	// Record request 2
@@ -85,6 +86,12 @@ func TestSessionManagerRecordRequestAndSummary(t *testing.T) {
 	}
 	if len(sess.RecentRequests) != 2 {
 		t.Errorf("expected 2 recent requests, got %d", len(sess.RecentRequests))
+	}
+	if got := sess.RecentRequests[1].TokensPerSecond; got != 400 {
+		t.Errorf("expected first request speed 400 tok/s, got %.2f", got)
+	}
+	if got := sess.TokensPerSecond; got < 199.9 || got > 200.1 {
+		t.Errorf("expected weighted session speed 200 tok/s, got %.2f", got)
 	}
 
 	summary := mgr.GetSummary()
@@ -236,5 +243,3 @@ func TestSessionManagerMetricsRecorder(t *testing.T) {
 		t.Errorf("expected session model 'anthropic/claude-3-7-sonnet', got: %+v", s.Models)
 	}
 }
-
-

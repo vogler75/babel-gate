@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -170,6 +171,12 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "zoomIntoDay") {
 		t.Errorf("expected 'zoomIntoDay' function in dashboard HTML")
 	}
+	if !contains(html, "Output Speed") || !contains(html, "tokens_per_second") {
+		t.Errorf("expected per-session token generation speed in dashboard HTML")
+	}
+	if !contains(html, "route-provider") || !contains(html, "populateRouteModelSelect") {
+		t.Errorf("expected provider-filtered virtual route model selection in dashboard HTML")
+	}
 }
 
 func contains(s, substr string) bool {
@@ -273,3 +280,60 @@ func TestDashboardHandler_APIModels_MultipleProviders(t *testing.T) {
 	}
 }
 
+func TestDashboardHandler_RoutingAPI(t *testing.T) {
+	handler, _, cleanup := setupTestDashboard(t)
+	defer cleanup()
+
+	body := []byte(`{"default":"","routes":{"fast":"google/gemini-2.5-flash"},"fallbacks":{"fast":["openai/gpt-4o"]}}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/routing", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.HandleAPIRouting(w, req)
+	// The setup has no providers, so provider-prefixed targets are rejected.
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid provider status 400, got %d", w.Code)
+	}
+
+	valid := []byte(`{"default":"","routes":{"fast":"virtual-model"},"fallbacks":{}}`)
+	req = httptest.NewRequest(http.MethodPut, "/api/routing", bytes.NewReader(valid))
+	w = httptest.NewRecorder()
+	handler.HandleAPIRouting(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := handler.engine.GetRoutes()["fast"]; got != "virtual-model" {
+		t.Fatalf("expected live route update, got %q", got)
+	}
+}
+
+func TestDashboardHandler_ProviderTogglePersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  openai:\n    type: openai\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewDashboardHandler(engine, router.NewCatalog(engine), nil, nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/openai", bytes.NewBufferString(`{"enabled":true}`))
+	w := httptest.NewRecorder()
+	handler.HandleAPIProvider(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(engine.GetProviders()) != 1 {
+		t.Fatal("provider was not enabled in the running engine")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(data), "enabled: true") {
+		t.Fatalf("provider state was not persisted:\n%s", data)
+	}
+}

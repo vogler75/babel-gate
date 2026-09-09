@@ -3,9 +3,10 @@ package web
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
+	"strings"
 	"time"
 
+	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/session"
@@ -42,33 +43,69 @@ func (d *DashboardHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *DashboardHandler) HandleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	providersMap := d.engine.GetProviders()
-	provList := make([]map[string]any, 0, len(providersMap))
-	for name, p := range providersMap {
-		provList = append(provList, map[string]any{
-			"name":     name,
-			"type":     p.Type(),
-			"priority": d.engine.GetProviderPriority(name),
-		})
-	}
-
-	sort.Slice(provList, func(i, j int) bool {
-		prioI := provList[i]["priority"].(int)
-		prioJ := provList[j]["priority"].(int)
-		if prioI != prioJ {
-			return prioI < prioJ
-		}
-		return provList[i]["name"].(string) < provList[j]["name"].(string)
-	})
-
-	routes := d.engine.GetRoutes()
-
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":    "healthy",
-		"providers": provList,
-		"routes":    routes,
+		"providers": d.engine.GetProviderStates(),
+		"routes":    d.engine.GetRoutes(),
 	})
+}
+
+func (d *DashboardHandler) HandleAPIProvider(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.Header().Set("Allow", http.MethodPut)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/api/providers/")
+	if name == "" || strings.Contains(name, "/") {
+		http.Error(w, "invalid provider name", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+		http.Error(w, "body must contain an enabled boolean", http.StatusBadRequest)
+		return
+	}
+	persisted, err := d.engine.SetProviderEnabled(name, *body.Enabled)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "enabled": *body.Enabled, "persisted": persisted})
+}
+
+func (d *DashboardHandler) HandleAPIRouting(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet {
+		_ = json.NewEncoder(w).Encode(d.engine.GetRouting())
+		return
+	}
+	if r.Method != http.MethodPut {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPut)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var routing config.RoutingConfig
+	if err := json.NewDecoder(r.Body).Decode(&routing); err != nil {
+		http.Error(w, "invalid routing JSON", http.StatusBadRequest)
+		return
+	}
+	if routing.Routes == nil {
+		routing.Routes = make(map[string]string)
+	}
+	if routing.Fallbacks == nil {
+		routing.Fallbacks = make(map[string][]string)
+	}
+	persisted, err := d.engine.SetRouting(routing)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"routing": d.engine.GetRouting(), "persisted": persisted})
 }
 
 func (d *DashboardHandler) HandleAPIModels(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +340,19 @@ const dashboardHTML = `<!DOCTYPE html>
     .btn-sm:hover { background: #30363d; color: var(--text-bright); }
     .btn-outline { background: transparent; border: 1px solid var(--border); color: #8b949e; }
     .btn-outline:hover { background: #21262d; color: #f85149; border-color: #f85149; }
+    .toggle { position: relative; display: inline-block; width: 42px; height: 24px; margin: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; inset: 0; cursor: pointer; background: #484f58; border-radius: 20px; transition: .2s; }
+    .toggle-slider:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
+    .toggle input:checked + .toggle-slider { background: var(--accent); }
+    .toggle input:checked + .toggle-slider:before { transform: translateX(18px); }
+    .toggle input:disabled + .toggle-slider { opacity: .55; cursor: wait; }
+    .route-row { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.4fr) auto; gap: .6rem; align-items: center; margin-bottom: .6rem; }
+    .alias-route-row, .alias-route-header { grid-template-columns: minmax(140px, .8fr) minmax(140px, .7fr) minmax(220px, 1.4fr) auto; }
+    .alias-route-header { display: grid; gap: .6rem; color: #8b949e; font-size: .75rem; margin-bottom: .35rem; padding: 0 .1rem; }
+    .route-row input { min-width: 0; }
+    .route-row select { min-width: 0; }
+    .muted { color: #8b949e; font-size: .8rem; }
     
     .token-in { color: var(--stat-in); font-weight: 600; font-family: ui-monospace, monospace; }
     .token-out { color: var(--stat-out); font-weight: 600; font-family: ui-monospace, monospace; }
@@ -482,30 +532,55 @@ const dashboardHTML = `<!DOCTYPE html>
               <th>Requests</th>
               <th>Input Tokens</th>
               <th>Output Tokens</th>
+              <th>Output Speed</th>
               <th>Total Tokens</th>
               <th>Last Active</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="sessionsTable">
-            <tr><td colspan="9" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>
+            <tr><td colspan="10" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- Active Providers -->
+    <!-- Provider Configuration -->
     <div class="card" style="margin-bottom: 1.75rem;">
-      <h2 style="margin-bottom: 0.75rem;">Connected Upstream Providers <span class="badge" id="provCount">0</span></h2>
+      <h2 style="margin-bottom: 0.25rem;">Upstream Providers <span class="badge" id="provCount">0</span></h2>
+      <div class="muted" style="margin-bottom: .75rem;">Changes take effect immediately and are saved when a YAML configuration file is active.</div>
       <div style="overflow-x: auto;">
         <table>
           <thead>
-            <tr><th>Name</th><th>Driver</th><th>Priority</th><th>Status</th></tr>
+            <tr><th>Name</th><th>Driver</th><th>Priority</th><th>Status</th><th>Enabled</th></tr>
           </thead>
           <tbody id="providersTable">
-            <tr><td colspan="4">Loading providers...</td></tr>
+            <tr><td colspan="5">Loading providers...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Visual Routing Configuration -->
+    <div class="card" style="margin-bottom: 1.75rem;">
+      <h2 style="margin-bottom: 0.25rem;">Visual Route Configuration <span class="badge">Live</span></h2>
+      <div class="muted" style="margin-bottom: 1rem;">Use provider-prefixed targets such as <code>google/gemini-2.5-flash</code>.</div>
+      <div class="form-group">
+        <label for="defaultRoute">Default route (optional)</label>
+        <input id="defaultRoute" list="routeTargets" placeholder="provider/model">
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin: 1rem 0 .6rem;">
+        <strong>Aliases</strong><button class="btn-sm" onclick="addRouteRow()">+ Add alias</button>
+      </div>
+      <div class="alias-route-header"><span>Virtual route</span><span>Provider</span><span>Model</span><span></span></div>
+      <div id="routeRows"></div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin: 1rem 0 .6rem;">
+        <strong>Fallback chains</strong><button class="btn-sm" onclick="addFallbackRow()">+ Add fallback</button>
+      </div>
+      <div id="fallbackRows"></div>
+      <datalist id="routeTargets"></datalist>
+      <div style="display:flex; align-items:center; gap:.75rem; margin-top:1rem;">
+        <button onclick="saveRouting()">Save Routes</button><span id="routingStatus" class="muted"></span>
       </div>
     </div>
 
@@ -569,6 +644,11 @@ const dashboardHTML = `<!DOCTYPE html>
       return Number(num).toLocaleString();
     }
 
+    function formatTokensPerSecond(value) {
+      const rate = Number(value || 0);
+      return rate > 0 ? rate.toFixed(1) + ' tok/s' : '—';
+    }
+
     function formatRelativeTime(dateStr) {
       if (!dateStr) return '';
       const date = new Date(dateStr);
@@ -613,7 +693,178 @@ const dashboardHTML = `<!DOCTYPE html>
     let allProviders = [];
     let allModels = [];
     let priorityMap = {};
+    let currentRouting = { default: '', routes: {}, fallbacks: {} };
     const openDetails = new Set();
+
+    function routeInput(value, placeholder, className, list) {
+      const input = document.createElement('input');
+      input.value = value || '';
+      input.placeholder = placeholder;
+      input.className = className;
+      if (list) input.setAttribute('list', 'routeTargets');
+      return input;
+    }
+
+    function addRouteRow(alias, target) {
+      const row = document.createElement('div');
+      row.className = 'route-row alias-route-row';
+      row.appendChild(routeInput(alias, 'Alias, e.g. fast', 'route-alias', false));
+
+      let providerName = '';
+      let modelName = target || '';
+      const slash = modelName.indexOf('/');
+      if (slash > 0) {
+        providerName = modelName.slice(0, slash);
+        modelName = modelName.slice(slash + 1);
+      } else if (!target) {
+        const preferred = allProviders.find(p => p.enabled) || allProviders[0];
+        providerName = preferred ? preferred.name : '';
+      }
+
+      const providerSelect = document.createElement('select');
+      providerSelect.className = 'route-provider';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Select provider';
+      providerSelect.appendChild(placeholder);
+      allProviders.forEach(provider => {
+        const option = document.createElement('option');
+        option.value = provider.name;
+        option.textContent = provider.name.toUpperCase() + (provider.enabled ? '' : ' (disabled)');
+        providerSelect.appendChild(option);
+      });
+      if (providerName && !allProviders.some(provider => provider.name === providerName)) {
+        const option = document.createElement('option');
+        option.value = providerName;
+        option.textContent = providerName.toUpperCase() + ' (unavailable)';
+        providerSelect.appendChild(option);
+      }
+      providerSelect.value = providerName;
+      row.appendChild(providerSelect);
+
+      const modelSelect = document.createElement('select');
+      modelSelect.className = 'route-model';
+      populateRouteModelSelect(modelSelect, providerName, modelName);
+      providerSelect.onchange = () => populateRouteModelSelect(modelSelect, providerSelect.value, '');
+      row.appendChild(modelSelect);
+
+      const remove = document.createElement('button');
+      remove.className = 'btn-sm btn-outline';
+      remove.textContent = 'Remove';
+      remove.onclick = () => row.remove();
+      row.appendChild(remove);
+      document.getElementById('routeRows').appendChild(row);
+    }
+
+    function providerModels(providerName) {
+      const seen = new Set();
+      return allModels.filter(model => model.type !== 'alias' && model.provider === providerName).map(model => {
+        const rawID = String(model.id || '');
+        return rawID.startsWith(providerName + '/') ? rawID.slice(providerName.length + 1) : rawID;
+      }).filter(modelID => {
+        if (!modelID || seen.has(modelID)) return false;
+        seen.add(modelID);
+        return true;
+      }).sort((a, b) => a.localeCompare(b));
+    }
+
+    function populateRouteModelSelect(select, providerName, selectedModel) {
+      select.innerHTML = '';
+      const models = providerModels(providerName);
+      const selectedUnavailable = !!selectedModel && !models.includes(selectedModel);
+      if (selectedUnavailable) models.unshift(selectedModel);
+      if (models.length === 0) {
+        const option = document.createElement('option');
+        option.value = selectedModel || '';
+        option.textContent = providerName ? 'No models available' : (selectedModel || 'Select a provider first');
+        select.appendChild(option);
+        return;
+      }
+      models.forEach(modelID => {
+        const option = document.createElement('option');
+        option.value = modelID;
+        option.textContent = modelID + (modelID === selectedModel && selectedUnavailable ? ' (current)' : '');
+        select.appendChild(option);
+      });
+      select.value = selectedModel && models.includes(selectedModel) ? selectedModel : models[0];
+    }
+
+    function addFallbackRow(model, targets) {
+      const row = document.createElement('div');
+      row.className = 'route-row fallback-route-row';
+      row.appendChild(routeInput(model, 'Requested model or alias', 'fallback-model', false));
+      row.appendChild(routeInput((targets || []).join(', '), 'provider/model, provider/model', 'fallback-targets', false));
+      const remove = document.createElement('button');
+      remove.className = 'btn-sm btn-outline';
+      remove.textContent = 'Remove';
+      remove.onclick = () => row.remove();
+      row.appendChild(remove);
+      document.getElementById('fallbackRows').appendChild(row);
+    }
+
+    function renderRouting() {
+      document.getElementById('defaultRoute').value = currentRouting.default || '';
+      document.getElementById('routeRows').innerHTML = '';
+      Object.entries(currentRouting.routes || {}).sort().forEach(([alias, target]) => addRouteRow(alias, target));
+      document.getElementById('fallbackRows').innerHTML = '';
+      Object.entries(currentRouting.fallbacks || {}).sort().forEach(([model, targets]) => addFallbackRow(model, targets));
+      const targets = document.getElementById('routeTargets');
+      targets.innerHTML = '';
+      allModels.filter(m => m.type !== 'alias').forEach(m => {
+        const option = document.createElement('option');
+        const rawID = String(m.id || '');
+        const clean = m.provider && rawID.startsWith(m.provider + '/') ? rawID.slice(m.provider.length + 1) : rawID;
+        option.value = m.provider + '/' + clean;
+        targets.appendChild(option);
+      });
+    }
+
+    async function toggleProvider(name, enabled, checkbox) {
+      checkbox.disabled = true;
+      try {
+        const res = await fetch('/api/providers/' + encodeURIComponent(name), {
+          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: enabled})
+        });
+        if (!res.ok) throw new Error(await res.text());
+        await loadData();
+      } catch (err) {
+        checkbox.checked = !enabled;
+        alert('Could not update provider: ' + err.message);
+      } finally {
+        checkbox.disabled = false;
+      }
+    }
+
+    async function saveRouting() {
+      const status = document.getElementById('routingStatus');
+      const routes = {};
+      const fallbacks = {};
+      document.querySelectorAll('.alias-route-row').forEach(row => {
+        const alias = row.querySelector('.route-alias').value.trim();
+        const provider = row.querySelector('.route-provider').value.trim();
+        const model = row.querySelector('.route-model').value.trim();
+        const target = provider && model ? provider + '/' + model : model;
+        if (alias || target) routes[alias] = target;
+      });
+      document.querySelectorAll('.fallback-route-row').forEach(row => {
+        const model = row.querySelector('.fallback-model').value.trim();
+        const targets = row.querySelector('.fallback-targets').value.split(',').map(v => v.trim()).filter(Boolean);
+        if (model || targets.length) fallbacks[model] = targets;
+      });
+      status.textContent = 'Saving…';
+      try {
+        const res = await fetch('/api/routing', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+          default: document.getElementById('defaultRoute').value.trim(), routes: routes, fallbacks: fallbacks
+        })});
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        currentRouting = data.routing;
+        status.textContent = data.persisted ? 'Saved and active.' : 'Active for this process (no config file loaded).';
+        await loadData();
+      } catch (err) {
+        status.textContent = 'Save failed: ' + err.message.trim();
+      }
+    }
 
     function toggleDetails(sessionId) {
       const detailsRow = document.getElementById('details-' + sessionId);
@@ -650,7 +901,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         const tableBody = document.getElementById('sessionsTable');
         if (sessions.length === 0) {
-          tableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>';
+          tableBody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: #8b949e; padding: 1.5rem;">No active sessions yet. Use Claude Code, OpenAI SDK, or the playground below.</td></tr>';
           return;
         }
 
@@ -671,6 +922,7 @@ const dashboardHTML = `<!DOCTYPE html>
             '<td><strong>' + formatNumber(reqCount) + '</strong></td>' +
             '<td><span class="token-in">' + formatNumber(s.input_tokens) + '</span></td>' +
             '<td><span class="token-out">' + formatNumber(s.output_tokens) + '</span></td>' +
+            '<td><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(s.tokens_per_second) + '</strong></td>' +
             '<td><span class="token-total">' + formatNumber(s.total_tokens) + '</span></td>' +
             '<td title="' + escapeHtml(s.last_active) + '">' + formatRelativeTime(s.last_active) + '</td>' +
             '<td><div style="display: flex; gap: 0.35rem; align-items: center;">' +
@@ -688,7 +940,7 @@ const dashboardHTML = `<!DOCTYPE html>
           if (s.recent_requests && s.recent_requests.length > 0) {
             requestsHtml = '<table class="sub-table">' +
               '<thead><tr>' +
-              '<th>Time</th><th>Model</th><th>Type</th><th>Duration</th><th>Input Tokens</th><th>Output Tokens</th><th>Total</th><th>Status</th>' +
+              '<th>Time</th><th>Model</th><th>Type</th><th>Duration</th><th>Input Tokens</th><th>Output Tokens</th><th>Output Speed</th><th>Total</th><th>Status</th>' +
               '</tr></thead><tbody>' +
               s.recent_requests.map(r => {
                 const statusColor = r.status === 'success' ? '#3fb950' : '#f85149';
@@ -701,6 +953,7 @@ const dashboardHTML = `<!DOCTYPE html>
                   '<td>' + r.duration_ms + 'ms</td>' +
                   '<td><span class="token-in">' + formatNumber(r.input_tokens) + '</span></td>' +
                   '<td><span class="token-out">' + formatNumber(r.output_tokens) + '</span></td>' +
+                  '<td><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(r.tokens_per_second) + '</strong></td>' +
                   '<td><span class="token-total">' + formatNumber(r.total_tokens) + '</span></td>' +
                   '<td><span style="color: ' + statusColor + ';">● ' + escapeHtml(r.status) + '</span></td>' +
                   '</tr>';
@@ -708,7 +961,7 @@ const dashboardHTML = `<!DOCTYPE html>
               '</tbody></table>';
           }
 
-          detailsTr.innerHTML = '<td colspan="9" style="background: #11151c; padding: 0.75rem 1rem; border-top: 1px dashed var(--border);">' +
+          detailsTr.innerHTML = '<td colspan="10" style="background: #11151c; padding: 0.75rem 1rem; border-top: 1px dashed var(--border);">' +
             '<div style="font-size: 0.82rem; font-weight: 600; color: #8b949e; margin-bottom: 0.35rem;">Request History for Session ' + escapeHtml(s.id) + '</div>' +
             requestsHtml +
             '</td>';
@@ -809,9 +1062,10 @@ const dashboardHTML = `<!DOCTYPE html>
 
     async function loadData() {
       try {
-        const [statusRes, modelsRes] = await Promise.all([
+        const [statusRes, modelsRes, routingRes] = await Promise.all([
           fetch('/api/status').then(r => r.json()),
-          fetch('/api/models').then(r => r.json())
+          fetch('/api/models').then(r => r.json()),
+          fetch('/api/routing').then(r => r.json())
         ]);
 
         allProviders = statusRes.providers || [];
@@ -826,6 +1080,7 @@ const dashboardHTML = `<!DOCTYPE html>
           return String(a.name || '').localeCompare(String(b.name || ''));
         });
         allModels = modelsRes.models || [];
+        currentRouting = routingRes || { default: '', routes: {}, fallbacks: {} };
 
         // Providers table
         const provBody = document.getElementById('providersTable');
@@ -835,17 +1090,40 @@ const dashboardHTML = `<!DOCTYPE html>
           const tr = document.createElement('tr');
           const pillClass = getProviderPillClass(p.type || p.name);
           const prioText = p.priority !== undefined ? ('Prio ' + p.priority) : 'Prio 100';
+          const online = p.enabled
+            ? '<span style="color: #3fb950;">● Online</span>'
+            : '<span style="color: #8b949e;">○ Disabled</span>';
           tr.innerHTML = '<td><strong>' + escapeHtml(p.name) + '</strong></td>' +
             '<td><span class="pill ' + pillClass + '">' + escapeHtml(p.type) + '</span></td>' +
             '<td><span class="badge" style="font-weight: 600; color: #58a6ff;">' + prioText + '</span></td>' +
-            '<td><span style="color: #3fb950;">● Online</span></td>';
+            '<td>' + online + '</td>';
+          const action = document.createElement('td');
+          action.style.whiteSpace = 'nowrap';
+          const label = document.createElement('label');
+          label.className = 'toggle';
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.checked = !!p.enabled;
+          checkbox.setAttribute('aria-label', (p.enabled ? 'Disable ' : 'Enable ') + p.name);
+          checkbox.onchange = () => toggleProvider(p.name, checkbox.checked, checkbox);
+          const slider = document.createElement('span');
+          slider.className = 'toggle-slider';
+          label.appendChild(checkbox);
+          label.appendChild(slider);
+          action.appendChild(label);
+          const actionText = document.createElement('span');
+          actionText.className = 'muted';
+          actionText.style.marginLeft = '.5rem';
+          actionText.textContent = p.enabled ? 'Disable' : 'Enable';
+          action.appendChild(actionText);
+          tr.appendChild(action);
           provBody.appendChild(tr);
         });
 
         // Provider dropdown
         const provSelect = document.getElementById('providerSelect');
         provSelect.innerHTML = '<option value="">All Providers</option>';
-        allProviders.forEach(p => {
+        allProviders.filter(p => p.enabled).forEach(p => {
           const opt = document.createElement('option');
           opt.value = p.name;
           opt.textContent = p.name.toUpperCase() + ' (' + p.type + ')';
@@ -910,6 +1188,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         // Populate Model dropdown
         onProviderChange();
+        renderRouting();
       } catch (err) {
         console.error('Error loading dashboard data:', err);
       }
@@ -1799,4 +2078,3 @@ routing:
 </body>
 </html>
 `
-

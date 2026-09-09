@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,6 +39,15 @@ const (
 	colorWhite   = "\033[37m"
 )
 
+type tuiPane int
+
+const (
+	paneProviders tuiPane = iota
+	paneSessions
+	paneLogs
+	paneCount
+)
+
 // IsTerminal returns true if stdout is connected to a terminal.
 func IsTerminal() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
@@ -45,18 +55,21 @@ func IsTerminal() bool {
 
 // TUI represents the interactive terminal GUI.
 type TUI struct {
-	mu         sync.Mutex
-	srv        *server.Server
-	engine     *router.Engine
-	ring       *logger.RingBuffer
-	startTime  time.Time
-	scrollPos  int // 0 means bottom (auto-scroll), >0 means scrolled up by N lines
-	hScrollPos int // 0 means left edge, >0 means scrolled right by N columns
-	autoScroll bool
-	stopChan   chan struct{}
-	origTerm   *term.State
-	cols       int
-	rows       int
+	mu                sync.Mutex
+	srv               *server.Server
+	engine            *router.Engine
+	ring              *logger.RingBuffer
+	startTime         time.Time
+	scrollPos         int // 0 means bottom (auto-scroll), >0 means scrolled up by N lines
+	hScrollPos        int // 0 means left edge, >0 means scrolled right by N columns
+	autoScroll        bool
+	stopChan          chan struct{}
+	origTerm          *term.State
+	cols              int
+	rows              int
+	activePane        tuiPane
+	providerSelection int
+	sessionSelection  int
 }
 
 // New creates a new TUI instance.
@@ -181,6 +194,8 @@ func (t *TUI) readInput(ch chan<- string) {
 						ch <- "home"
 					case 'F':
 						ch <- "end"
+					case 'Z':
+						ch <- "backtab"
 					case '5': // Page Up (\033[5~)
 						if reader.Buffered() > 0 {
 							_, _ = reader.ReadByte() // '~'
@@ -216,53 +231,71 @@ func (t *TUI) handleKey(key string) bool {
 		close(t.stopChan)
 		return true
 
+	case "\t":
+		t.activePane = (t.activePane + 1) % paneCount
+
+	case "backtab":
+		t.activePane = (t.activePane + paneCount - 1) % paneCount
+
 	case "up", "k":
-		t.scrollPos++
-		t.autoScroll = false
+		t.moveSelection(-1)
 
 	case "down", "j":
-		if t.scrollPos > 0 {
-			t.scrollPos--
-		}
-		if t.scrollPos == 0 {
-			t.autoScroll = true
-		}
+		t.moveSelection(1)
 
 	case "right", "l":
-		t.hScrollPos += 8
+		if t.activePane == paneLogs {
+			t.hScrollPos += 8
+		}
 
 	case "left", "h":
-		t.hScrollPos -= 8
-		if t.hScrollPos < 0 {
-			t.hScrollPos = 0
+		if t.activePane == paneLogs {
+			t.hScrollPos -= 8
+			if t.hScrollPos < 0 {
+				t.hScrollPos = 0
+			}
 		}
 
 	case "0":
 		t.hScrollPos = 0
 
 	case "pageup":
-		t.scrollPos += 10
-		t.autoScroll = false
+		if t.activePane == paneLogs {
+			t.scrollPos += 10
+			t.autoScroll = false
+		}
 
 	case "pagedown":
-		t.scrollPos -= 10
-		if t.scrollPos <= 0 {
-			t.scrollPos = 0
-			t.autoScroll = true
+		if t.activePane == paneLogs {
+			t.scrollPos -= 10
+			if t.scrollPos <= 0 {
+				t.scrollPos = 0
+				t.autoScroll = true
+			}
 		}
 
 	case "home":
-		if t.ring != nil {
+		if t.activePane == paneProviders {
+			t.providerSelection = 0
+		} else if t.activePane == paneSessions {
+			t.sessionSelection = 0
+		} else if t.ring != nil {
 			t.scrollPos = t.ring.Count()
 			t.autoScroll = false
 		}
 
-	case "end", "G":
-		t.scrollPos = 0
-		t.autoScroll = true
+	case "end":
+		if t.activePane == paneProviders && t.engine != nil {
+			t.providerSelection = maxInt(0, len(t.engine.GetProviderStates())-1)
+		} else if t.activePane == paneSessions && t.srv != nil && t.srv.Sessions() != nil {
+			t.sessionSelection = maxInt(0, len(t.srv.Sessions().ListSessions())-1)
+		} else {
+			t.scrollPos = 0
+			t.autoScroll = true
+		}
 
 	case "c", "C":
-		if t.ring != nil {
+		if t.activePane == paneLogs && t.ring != nil {
 			t.ring.Clear()
 			t.scrollPos = 0
 			t.hScrollPos = 0
@@ -271,9 +304,66 @@ func (t *TUI) handleKey(key string) bool {
 
 	case "r", "R":
 		t.updateSize()
+
+	case "p", "P":
+		t.activePane = paneProviders
+
+	case "s", "S":
+		t.activePane = paneSessions
+
+	case "g", "G":
+		t.activePane = paneLogs
+
+	case " ":
+		if t.activePane == paneProviders && t.engine != nil {
+			providers := t.engine.GetProviderStates()
+			if len(providers) > 0 {
+				if t.providerSelection >= len(providers) {
+					t.providerSelection = 0
+				}
+				provider := providers[t.providerSelection]
+				persisted, err := t.engine.SetProviderEnabled(provider.Name, !provider.Enabled)
+				if err != nil {
+					log.Printf("[TUI] failed to update provider %s: %v", provider.Name, err)
+				} else {
+					location := "for this process"
+					if persisted {
+						location = "and saved to config"
+					}
+					log.Printf("[TUI] provider %s %s %s", provider.Name, enabledWord(!provider.Enabled), location)
+				}
+			}
+		}
 	}
 
 	return false
+}
+
+func (t *TUI) moveSelection(delta int) {
+	switch t.activePane {
+	case paneProviders:
+		count := 0
+		if t.engine != nil {
+			count = len(t.engine.GetProviderStates())
+		}
+		t.providerSelection = clampInt(t.providerSelection+delta, 0, maxInt(0, count-1))
+	case paneSessions:
+		count := 0
+		if t.srv != nil && t.srv.Sessions() != nil {
+			count = len(t.srv.Sessions().ListSessions())
+		}
+		t.sessionSelection = clampInt(t.sessionSelection+delta, 0, maxInt(0, count-1))
+	case paneLogs:
+		if delta < 0 {
+			t.scrollPos++
+			t.autoScroll = false
+		} else if t.scrollPos > 0 {
+			t.scrollPos--
+			if t.scrollPos == 0 {
+				t.autoScroll = true
+			}
+		}
+	}
 }
 
 // render draws a unified, perfectly-aligned terminal frame.
@@ -323,25 +413,62 @@ func (t *TUI) render() {
 	sb.WriteString(t.renderBoxLine(statusLine, width))
 	sb.WriteString("\r\n")
 
-	// 2. Middle Section: Connected Upstream Providers
-	sb.WriteString(t.renderDivider(" Connected Upstream Providers ", width))
-	sb.WriteString("\r\n")
-
-	providersList := t.getSortedProvidersInfo()
-	provLines := len(providersList)
-	if provLines == 0 {
-		sb.WriteString(t.renderBoxLine(" (No upstream providers registered)", width))
-		sb.WriteString("\r\n")
-		provLines = 1
-	} else {
-		for _, p := range providersList {
-			sb.WriteString(t.renderBoxLine(p, width))
-			sb.WriteString("\r\n")
-		}
+	// 2. Focusable Providers and Sessions panes
+	providerLines := t.getSortedProvidersInfo()
+	providerCount := len(providerLines)
+	if providerCount == 0 {
+		providerLines = []string{" (No upstream providers configured)"}
+	}
+	sessionLines := t.getSessionsInfo(0)
+	sessionCount := len(sessionLines)
+	if sessionCount == 0 {
+		sessionLines = []string{" (No sessions recorded yet)"}
 	}
 
-	// 3. Lower Section: Live Request Logs
-	logHeaderTitle := " Live Request Logs "
+	// Reserve one row for each pane and distribute remaining space, keeping a
+	// useful log area even on smaller terminals.
+	availableContent := t.rows - 7
+	providerHeight, sessionHeight := 1, 1
+	remaining := availableContent - 5 // reserve at least three rows for logs when possible
+	maxProviderHeight := minInt(maxInt(1, providerCount), 5)
+	maxSessionHeight := minInt(maxInt(1, sessionCount), 6)
+	for remaining > 0 && (providerHeight < maxProviderHeight || sessionHeight < maxSessionHeight) {
+		if providerHeight < maxProviderHeight && remaining > 0 {
+			providerHeight++
+			remaining--
+		}
+		if sessionHeight < maxSessionHeight && remaining > 0 {
+			sessionHeight++
+			remaining--
+		}
+	}
+	providerLines = selectedWindow(providerLines, t.providerSelection, providerHeight)
+	sessionLines = selectedWindow(sessionLines, t.sessionSelection, sessionHeight)
+
+	providerTitle := fmt.Sprintf("Providers [%d]", providerCount)
+	if providerCount > 0 {
+		providerTitle += fmt.Sprintf(" %d/%d", t.providerSelection+1, providerCount)
+	}
+	sb.WriteString(t.renderDivider(t.focusedPaneTitle(paneProviders, providerTitle), width))
+	sb.WriteString("\r\n")
+	for _, line := range providerLines {
+		sb.WriteString(t.renderBoxLine(line, width))
+		sb.WriteString("\r\n")
+	}
+
+	sessionTitle := fmt.Sprintf("Sessions [%d]", sessionCount)
+	if sessionCount > 0 {
+		sessionTitle += fmt.Sprintf(" %d/%d", t.sessionSelection+1, sessionCount)
+	}
+	sb.WriteString(t.renderDivider(t.focusedPaneTitle(paneSessions, sessionTitle), width))
+	sb.WriteString("\r\n")
+	for _, line := range sessionLines {
+		sb.WriteString(t.renderBoxLine(line, width))
+		sb.WriteString("\r\n")
+	}
+
+	// 3. Focusable Live Request Logs pane
+	logHeaderTitle := "Live Request Logs"
 	var scrollIndicators []string
 	if !t.autoScroll && t.scrollPos > 0 {
 		scrollIndicators = append(scrollIndicators, fmt.Sprintf("PAUSED: +%d lines", t.scrollPos))
@@ -350,18 +477,17 @@ func (t *TUI) render() {
 		scrollIndicators = append(scrollIndicators, fmt.Sprintf("Col +%d", t.hScrollPos))
 	}
 	if len(scrollIndicators) > 0 {
-		logHeaderTitle = fmt.Sprintf(" Live Request Logs [%s%s%s] ", colorYellow+colorBold, strings.Join(scrollIndicators, ", "), colorReset)
+		logHeaderTitle = fmt.Sprintf("Live Request Logs [%s%s%s]", colorYellow+colorBold, strings.Join(scrollIndicators, ", "), colorReset)
 	}
-	sb.WriteString(t.renderDivider(logHeaderTitle, width))
+	sb.WriteString(t.renderDivider(t.focusedPaneTitle(paneLogs, logHeaderTitle), width))
 	sb.WriteString("\r\n")
 
 	// Calculate log box height dynamically:
-	// Frame overhead:
-	// Top border (1) + Status row (1) + Providers divider (1) + Providers rows (provLines) + Logs divider (1) + Bottom border (1) + Footer row (1)
-	fixedRows := 1 + 1 + 1 + provLines + 1 + 1 + 1
+	// Frame overhead: border/status + three dividers + provider/session rows + bottom/footer.
+	fixedRows := 7 + len(providerLines) + len(sessionLines)
 	logHeight := t.rows - fixedRows
-	if logHeight < 3 {
-		logHeight = 3
+	if logHeight < 1 {
+		logHeight = 1
 	}
 
 	var allLines []string
@@ -386,7 +512,8 @@ func (t *TUI) render() {
 	sb.WriteString("\r\n")
 
 	// 4. Footer Shortcuts
-	footer := fmt.Sprintf(" %sq%s: Quit │ %s↑/↓/←/→%s: Scroll │ %sEnd%s: Auto-Scroll │ %sc%s: Clear │ %sr%s: Redraw",
+	footer := fmt.Sprintf(" %sq%s Quit │ %sTab/⇧Tab%s Pane │ %s↑/↓%s Select/Scroll │ %sSpace%s Toggle Provider │ %s←/→%s Logs │ %sc%s Clear Logs",
+		colorBold, colorReset,
 		colorBold, colorReset,
 		colorBold, colorReset,
 		colorBold, colorReset,
@@ -432,27 +559,21 @@ func (t *TUI) getSortedProvidersInfo() []string {
 		return nil
 	}
 
-	all := t.engine.GetProviders()
-	if len(all) == 0 {
+	states := t.engine.GetProviderStates()
+	if len(states) == 0 {
 		return nil
 	}
-
-	type provItem struct {
-		name     string
-		priority int
-		typeStr  string
-		url      string
-		models   int
+	if t.providerSelection >= len(states) {
+		t.providerSelection = 0
 	}
 
-	var items []provItem
-	for name, p := range all {
-		prio := t.engine.GetProviderPriority(name)
-		modelsCount := len(t.engine.GetProviderModels(name))
+	var res []string
+	for index, state := range states {
+		modelsCount := len(t.engine.GetProviderModels(state.Name))
 
 		url := ""
 		if t.srv != nil && t.srv.Config() != nil {
-			if pc, ok := t.srv.Config().Providers[name]; ok {
+			if pc, ok := t.srv.Config().Providers[state.Name]; ok {
 				url = pc.BaseURL
 			}
 		}
@@ -460,38 +581,138 @@ func (t *TUI) getSortedProvidersInfo() []string {
 			url = "(default cloud API)"
 		}
 
-		items = append(items, provItem{
-			name:     name,
-			priority: prio,
-			typeStr:  p.Type(),
-			url:      url,
-			models:   modelsCount,
-		})
-	}
-
-	// Sort by priority ascending, then name
-	for i := 0; i < len(items)-1; i++ {
-		for j := i + 1; j < len(items); j++ {
-			if items[i].priority > items[j].priority || (items[i].priority == items[j].priority && items[i].name > items[j].name) {
-				items[i], items[j] = items[j], items[i]
-			}
+		selector := " "
+		if index == t.providerSelection {
+			selector = "▶"
 		}
-	}
-
-	var res []string
-	for _, it := range items {
-		line := fmt.Sprintf(" %s[Prio %d]%s %s%-9s%s (%s) %s● Connected%s (%d models) %s%s%s",
-			colorDim, it.priority, colorReset,
-			colorBold+colorCyan, strings.ToUpper(it.name), colorReset,
-			it.typeStr,
-			colorGreen, colorReset,
-			it.models,
-			colorDim, it.url, colorReset,
+		statusColor := colorDim
+		status := "○ Disabled"
+		if state.Enabled {
+			statusColor = colorGreen
+			status = "● Enabled "
+		}
+		line := fmt.Sprintf(" %s %s[Prio %d]%s %s%-9s%s (%s) %s%s%s (%d models) %s%s%s",
+			selector,
+			colorDim, state.Priority, colorReset,
+			colorBold+colorCyan, strings.ToUpper(state.Name), colorReset,
+			state.Type,
+			statusColor, status, colorReset,
+			modelsCount,
+			colorDim, url, colorReset,
 		)
 		res = append(res, line)
 	}
 
 	return res
+}
+
+func (t *TUI) getSessionsInfo(limit int) []string {
+	if t.srv == nil || t.srv.Sessions() == nil {
+		return nil
+	}
+	sessions := t.srv.Sessions().ListSessions()
+	if len(sessions) == 0 {
+		return nil
+	}
+	total := len(sessions)
+	t.sessionSelection = clampInt(t.sessionSelection, 0, maxInt(0, total-1))
+	if limit > 1 && len(sessions) > limit {
+		start := clampInt(t.sessionSelection-limit/2, 0, len(sessions)-limit)
+		sessions = sessions[start : start+limit]
+	}
+	lines := make([]string, 0, len(sessions)+1)
+	for index, sess := range sessions {
+		age := time.Since(sess.LastActive).Truncate(time.Second)
+		if age < 0 {
+			age = 0
+		}
+		model := "-"
+		if len(sess.Models) > 0 {
+			model = sess.Models[len(sess.Models)-1]
+		}
+		rate := "—"
+		if sess.TokensPerSecond > 0 {
+			rate = fmt.Sprintf("%.1f tok/s", sess.TokensPerSecond)
+		}
+		selector := " "
+		absoluteIndex := index
+		if limit > 1 && total > limit {
+			absoluteIndex = clampInt(t.sessionSelection-limit/2, 0, total-limit) + index
+		}
+		if absoluteIndex == t.sessionSelection {
+			selector = "▶"
+		}
+		lines = append(lines, fmt.Sprintf(" %s %s%-16s%s %-18s Req:%-4d Out:%-7s Speed:%s%-11s%s Active:%-8s %s%s%s",
+			selector,
+			colorBold+colorCyan, sess.ID, colorReset,
+			truncatePlain(sess.Client, 18), sess.RequestCount, formatTokens(int64(sess.OutputTokens)),
+			colorGreen, rate, colorReset, formatShortAge(age),
+			colorDim, model, colorReset))
+	}
+	return lines
+}
+
+func (t *TUI) focusedPaneTitle(pane tuiPane, title string) string {
+	if t.activePane == pane {
+		return fmt.Sprintf(" %s▶ %s%s ", colorCyan+colorBold, title, colorReset)
+	}
+	return " " + title + " "
+}
+
+func selectedWindow(lines []string, selection, height int) []string {
+	if height <= 0 || len(lines) <= height {
+		return lines
+	}
+	start := clampInt(selection-height/2, 0, len(lines)-height)
+	return lines[start : start+height]
+}
+
+func clampInt(value, low, high int) int {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func truncatePlain(value string, width int) string {
+	if visualWidth(value) <= width {
+		return value
+	}
+	return stripANSI(truncateToVisualWidth(value, width))
+}
+
+func formatShortAge(age time.Duration) string {
+	if age < time.Minute {
+		return fmt.Sprintf("%ds ago", int(age.Seconds()))
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	}
+	return fmt.Sprintf("%dh ago", int(age.Hours()))
+}
+
+func enabledWord(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func (t *TUI) renderBorderTop(title string, width int) string {

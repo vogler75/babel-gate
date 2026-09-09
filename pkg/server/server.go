@@ -50,6 +50,8 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/", dashboardHandler.HandleIndex)
 	mux.HandleFunc("/setup", dashboardHandler.HandleSetup)
 	mux.HandleFunc("/api/status", dashboardHandler.HandleAPIStatus)
+	mux.HandleFunc("/api/providers/", dashboardHandler.HandleAPIProvider)
+	mux.HandleFunc("/api/routing", dashboardHandler.HandleAPIRouting)
 	mux.HandleFunc("/api/models", dashboardHandler.HandleAPIModels)
 	mux.HandleFunc("/api/sessions", dashboardHandler.HandleAPISessions)
 	mux.HandleFunc("/api/sessions/clear", dashboardHandler.HandleAPIClearSessions)
@@ -261,7 +263,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, x-goog-api-key, x-session-id, x-client")
 
 		if r.Method == http.MethodOptions {
