@@ -27,19 +27,18 @@ func main() {
 	configPath := flag.String("config", "", "Path to YAML configuration file (optional; defaults to env vars)")
 	port := flag.Int("port", 0, "Server port (overrides config)")
 	copilotLogin := flag.Bool("copilot-login", false, "Perform interactive GitHub Copilot device registration")
-	background := flag.Bool("background", false, "Run in background/daemon mode (no TUI, logs to rotating file)")
+	background := flag.Bool("background", false, "Run in background/daemon mode (no TUI, logs to rotating file; on Windows also detaches and shows a tray icon)")
 	flag.BoolVar(background, "d", false, "Alias for -background")
 	noTUI := flag.Bool("no-tui", false, "Disable text GUI and run with standard console logging")
-	trayMode := flag.Bool("tray", false, "Run in background with a system tray icon (Windows only; implies -background)")
 	logFileFlag := flag.String("log-file", "", "Path to log file (default from config or logs/babelgate.log)")
 	logMaxSizeFlag := flag.Int("log-max-size-mb", 0, "Max size in MB before log rotation (default: 10)")
 	logMaxBackupsFlag := flag.Int("log-max-backups", -1, "Number of rotated log backups to keep (default: 5)")
 	flag.Parse()
 
-	// The tray is a background UI: no TUI, logs to the rotating file.
-	if *trayMode {
-		*background = true
-	}
+	// On Windows -background detaches from the console and puts an icon in the
+	// notification area. On other platforms it deliberately stays in the
+	// foreground so Docker/systemd supervision keeps working.
+	trayMode := *background && tray.Supported()
 
 	if *copilotLogin {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -119,11 +118,11 @@ func main() {
 	}
 	defer rotator.Close()
 
-	// -tray detaches into the background so the terminal is handed straight
-	// back. This happens only after the config and the log file have been
-	// validated above, so those errors are still reported on the console;
+	// The tray build detaches into the background so the terminal is handed
+	// straight back. This happens only after the config and the log file have
+	// been validated above, so those errors are still reported on the console;
 	// everything from here on is only visible in the log file.
-	if *trayMode && !daemon.IsChild() {
+	if trayMode && !daemon.IsChild() {
 		pid, err := daemon.Detach()
 		if err != nil {
 			log.Fatalf("Failed to start in background: %v", err)
@@ -138,6 +137,17 @@ func main() {
 	interactiveTerm := tui.IsTerminal()
 	runTUI := !*background && !*noTUI && interactiveTerm
 
+	// Some console hosts — notably the legacy Windows cmd.exe — report as a
+	// terminal but cannot render the TUI's ANSI output. Fall back to plain
+	// console logging there and say so once logging is wired up below.
+	var hostNotice string
+	if runTUI {
+		if ok, host := tui.HostSupportsTUI(); !ok {
+			runTUI = false
+			hostNotice = fmt.Sprintf("Console host %q cannot render the text GUI; running in -no-tui mode (use PowerShell or Windows Terminal for the TUI)", host)
+		}
+	}
+
 	ring := logger.NewRingBuffer(1000)
 
 	if runTUI {
@@ -151,13 +161,17 @@ func main() {
 		// Now that logs go to a file, drop the console window that Windows
 		// gives us when launched from Explorer. Done here rather than earlier
 		// so config and log-file errors above are still visible on screen.
-		if *trayMode {
+		if trayMode {
 			tray.HideConsole()
 		}
 	} else {
 		// Headless / non-tty console: output to both stdout and rotating log file
 		mw := logger.NewMultiWriterWithRing(rotator, nil)
 		log.SetOutput(io.MultiWriter(os.Stdout, mw))
+	}
+
+	if hostNotice != "" {
+		log.Print(hostNotice)
 	}
 
 	engine, err := router.NewEngine(cfg)
@@ -252,7 +266,7 @@ func main() {
 			tuiCancel()
 		}()
 		_ = appTUI.Run(tuiCtx)
-	} else if *trayMode && tray.Supported() {
+	} else if trayMode {
 		trayCtx, trayCancel := context.WithCancel(context.Background())
 		go func() {
 			<-stop
@@ -269,9 +283,6 @@ func main() {
 			<-stop
 		}
 	} else {
-		if *trayMode {
-			log.Printf("Tray not supported on this platform; running in background mode")
-		}
 		<-stop
 	}
 

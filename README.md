@@ -209,6 +209,7 @@ Route Claude Code to Google's high-context Gemini models:
    {
      "env": {
        "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+       "ANTHROPIC_API_KEY": "dummy",
        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
        "CLAUDE_CODE_USE_BEDROCK": "0",
@@ -341,16 +342,15 @@ By default `babelgate` renders an interactive terminal UI. For long-running use 
 
 | Flag | Behaviour |
 | :--- | :--- |
-| `-background`, `-d` | No terminal UI. Logs go exclusively to the rotating log file. Stays in the foreground of your shell. |
+| `-background`, `-d` | No terminal UI. Logs go exclusively to the rotating log file. **On Windows** it detaches into the background and adds a system tray icon; elsewhere it stays in the foreground of your shell. |
 | `-no-tui` | No terminal UI, but keeps logging to the console (useful for Docker, systemd, CI). |
-| `-tray` | **Detaches into the background** and adds a system tray icon (Windows). Implies `-background`. |
 
-### Detached Background Mode
+`-background` deliberately stays in the foreground on macOS and Linux so Docker and systemd supervision keeps working.
 
-`-tray` is the only flag that truly daemonizes: it relaunches itself detached from your terminal and hands the prompt straight back.
+### Windows System Tray
 
-```bash
-./bin/babelgate -tray
+```powershell
+.\bin\babelgate.exe -background
 ```
 
 ```
@@ -359,28 +359,26 @@ By default `babelgate` renders an interactive terminal UI. For long-running use 
    Log file:  logs/babelgate.log
 ```
 
-The gateway keeps running after you close the terminal. Startup problems — a missing config, an unwritable log file — are still reported on the console before it detaches, so a failed start is never silent.
-
-To stop it, use the tray menu on Windows, or `kill <PID>` elsewhere; either way the shutdown is graceful.
-
-### Windows System Tray
-
-```powershell
-.\bin\babelgate.exe -tray
-```
-
-BabelGate places an icon in the notification area. Click it for a menu:
+BabelGate relaunches itself detached from your terminal, hands the prompt straight back, and places an icon in the notification area. Click it for a menu:
 
 - **Open Dashboard** — opens `http://localhost:<port>/` in your default browser
 - **Quit BabelGate** — shuts the gateway down gracefully
 
 Double-clicking the icon opens the dashboard directly. The icon is restored automatically if Explorer restarts.
 
+The gateway keeps running after you close the terminal. Startup problems — a missing config, an unwritable log file — are still reported on the console before it detaches, so a failed start is never silent.
+
 > [!TIP]
-> To start BabelGate with Windows, put a shortcut to `babelgate.exe -tray` in
+> To start BabelGate with Windows, put a shortcut to `babelgate.exe -background` in
 > `shell:startup` (press <kbd>Win</kbd>+<kbd>R</kbd>, type `shell:startup`).
 
-On macOS and Linux `-tray` still detaches into the background, but there is no menu bar / app indicator icon — a note is written to the log saying so.
+### Windows Console Hosts
+
+The terminal UI needs a console that renders ANSI escape sequences. PowerShell, Windows Terminal, and the Git Bash / WSL shells all qualify; the legacy `cmd.exe` console does not. When BabelGate detects it was launched from `cmd.exe` (or another unrecognised host) it logs a note and falls back to `-no-tui` mode automatically:
+
+```
+Console host "cmd.exe" cannot render the text GUI; running in -no-tui mode (use PowerShell or Windows Terminal for the TUI)
+```
 
 ---
 

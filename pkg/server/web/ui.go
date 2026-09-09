@@ -2009,6 +2009,7 @@ const setupHTML = `<!DOCTYPE html>
         <pre><code class="lang-json">{
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+    "ANTHROPIC_API_KEY": "dummy",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "CLAUDE_CODE_USE_BEDROCK": "0",
