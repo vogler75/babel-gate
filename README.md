@@ -56,7 +56,7 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
 - 🤖 **Turnkey Claude Code Support**:
   Run Claude Code against Google Gemini 2.5, GitHub Copilot, or local models without modifying Claude Code's binary.
 - 🔑 **GitHub Copilot RFC 8628 Integration**:
-  Built-in OAuth Device Flow (`./bin/babelgate -copilot-login` or web UI at `/setup`) and zero-config discovery of existing VS Code / JetBrains / GitHub CLI credentials.
+  Built-in OAuth Device Flow (`./bin/babelgate -copilot-login`) and zero-config discovery of existing VS Code / JetBrains / GitHub CLI credentials.
 - 📊 **Built-in Session & Token Telemetry**:
   Automatically identifies active clients (Claude Code, OpenAI SDK, Web Playground), tracks input/output/total token usage, duration, and error rates per session.
 - 🖥️ **Embedded Dark Web Dashboard**:
@@ -342,18 +342,15 @@ GitHub Copilot can be authenticated through three convenient methods:
    ```bash
    ./bin/babelgate -copilot-login
    ```
-   Follow the displayed URL and 8-character code to authorize. Credentials are securely stored in `~/.config/github-copilot/hosts.json`.
+   Follow the displayed URL and 8-character code to authorize in your terminal. Credentials are securely stored in `~/.config/github-copilot/hosts.json` and automatically loaded on startup.
 
-2. **Web Browser Setup UI**:
-   Visit **`http://localhost:8080/setup`**, click **"Start Device Registration"**, and complete authorization in your browser.
-
-3. **Zero-Config Auto-Discovery**:
+2. **Zero-Config Auto-Discovery**:
    If you are already logged in via VS Code, JetBrains, or the GitHub CLI (`gh auth login`), `babelgate` automatically reads your tokens from:
    - `~/.config/github-copilot/apps.json`
    - `~/.config/github-copilot/hosts.json`
    - `~/.config/gh/hosts.yml`
 
-4. **Environment Variable**:
+3. **Environment Variable**:
    ```bash
    export GITHUB_TOKEN="ghp_..."
    # or
@@ -370,7 +367,7 @@ GitHub Copilot can be authenticated through three convenient methods:
 - **Unified Model Catalog**: Interactive table of all upstream and aliased models.
 - **Streaming Prompt Playground**: Test any connected model with live token streaming and duration metrics directly in your browser.
 - **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), request counts, input/output token usage, duration, and error logs.
-- **Copilot Device Setup**: One-click device authorization at `/setup`.
+- **Setup & Client Integration Guide**: Step-by-step guides and configuration snippets at `/setup` for Claude Code, Codex CLI, Antigravity CLI, OpenAI SDK, Gemini SDK, and GitHub Copilot.
 
 ---
 
@@ -430,7 +427,7 @@ routing:
 | Endpoint | Methods | Protocol / Format | Description |
 |---|:---:|---|---|
 | `/` | `GET` | HTML / Web | Embedded Web Dashboard & Playground |
-| `/setup` | `GET` | HTML / Web | GitHub Copilot Device Code Setup |
+| `/setup` | `GET` | HTML / Web | Client Setup Guide & Integration Snippets |
 | `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
 | `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
 | `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |
@@ -440,8 +437,6 @@ routing:
 | `/api/status` | `GET` | JSON | Health check, active providers & routes |
 | `/api/models` | `GET` | JSON | Catalog of all active models and aliases |
 | `/api/sessions` | `GET`, `DELETE` | JSON | Active client sessions & token usage telemetry |
-| `/api/auth/copilot/device-code` | `POST` | JSON | Start GitHub Copilot RFC 8628 OAuth |
-| `/api/auth/copilot/poll` | `POST` | JSON | Poll GitHub Copilot OAuth status |
 
 ---
 

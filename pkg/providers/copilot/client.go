@@ -86,7 +86,7 @@ func (c *Client) ensureSessionToken(ctx context.Context, clientAuthToken string)
 
 	ghToken = ResolveGitHubToken(ghToken)
 	if ghToken == "" {
-		return "", "", fmt.Errorf("no GitHub Copilot token found. Run router with '-copilot-login' or visit http://localhost:8080/setup to connect")
+		return "", "", fmt.Errorf("no GitHub Copilot token found. Run router with '-copilot-login' to authenticate")
 	}
 
 	// If token itself is already a Copilot session token (contains tid=)

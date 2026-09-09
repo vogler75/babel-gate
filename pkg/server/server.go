@@ -55,8 +55,6 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/api/metrics/summary", dashboardHandler.HandleAPIMetricsSummary)
 	mux.HandleFunc("/api/metrics/daily", dashboardHandler.HandleAPIMetricsDaily)
 	mux.HandleFunc("/api/metrics/hourly", dashboardHandler.HandleAPIMetricsHourly)
-	mux.HandleFunc("/api/auth/copilot/device-code", dashboardHandler.HandleCopilotDeviceCode)
-	mux.HandleFunc("/api/auth/copilot/poll", dashboardHandler.HandleCopilotPoll)
 
 	// Anthropic Messages API (Claude Code / Anthropic SDK)
 	mux.HandleFunc("/v1/messages", anthropicHandler.HandleMessages)

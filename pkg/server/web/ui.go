@@ -1,15 +1,12 @@
 package web
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/metrics"
-	"github.com/vogler75/babel-gate/pkg/providers/copilot"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
@@ -232,96 +229,6 @@ func (d *DashboardHandler) HandleAPIMetricsHourly(w http.ResponseWriter, r *http
 		"date":     day.Format("2006-01-02"),
 		"hours":    hours,
 		"provider": provider,
-	})
-}
-
-func (d *DashboardHandler) HandleCopilotDeviceCode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	dcr, err := copilot.RequestDeviceCode(r.Context(), nil)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(dcr)
-}
-
-func (d *DashboardHandler) HandleCopilotPoll(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		DeviceCode string `json:"device_code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DeviceCode == "" {
-		http.Error(w, "missing device_code", http.StatusBadRequest)
-		return
-	}
-
-	payload := map[string]string{
-		"client_id":   copilot.DefaultClientID,
-		"device_code": req.DeviceCode,
-		"grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
-	}
-	bodyBytes, _ := json.Marshal(payload)
-
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, copilot.OAuthTokenURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": err.Error()})
-		return
-	}
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	var otr copilot.OAuthTokenResponse
-	_ = json.Unmarshal(respBody, &otr)
-
-	w.Header().Set("Content-Type", "application/json")
-	if otr.AccessToken != "" {
-		username, _ := copilot.GetAuthenticatedUser(r.Context(), nil, otr.AccessToken)
-		_ = copilot.SaveTokenToDisk(otr.AccessToken, username)
-
-		// Dynamically register or update copilot provider in the live engine
-		client := copilot.NewClient("copilot", otr.AccessToken, "", nil, nil)
-		d.engine.RegisterProvider(client)
-
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":   "success",
-			"username": username,
-		})
-		return
-	}
-
-	if otr.Error == "authorization_pending" {
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
-		return
-	}
-	if otr.Error == "slow_down" {
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "slow_down"})
-		return
-	}
-
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":  "error",
-		"error":   otr.Error,
-		"message": otr.ErrorDescription,
 	})
 }
 
@@ -1836,39 +1743,15 @@ print(response.text)</code></pre>
 
       <p>Use GitHub Copilot as a destination LLM provider. Route prompts, tools, and streams from Claude Code, OpenAI SDK, or Gemini SDK directly to Copilot models (<code>copilot/gpt-4o</code>, <code>copilot/gpt-4o-mini</code>, <code>copilot/claude-3.5-sonnet</code>, <code>copilot/o1</code>, etc.).</p>
 
-      <!-- Interactive Device Registration Widget -->
-      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.25rem; margin: 1rem 0;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
-          <strong style="color: var(--text-bright); font-size: 0.95rem;">🔑 Connect with GitHub Device Code</strong>
-          <button id="copilotAuthBtn" onclick="startCopilotRegistration()" class="btn-sm btn-primary" style="font-weight: 600;">Start Device Registration</button>
-        </div>
-        <p style="font-size: 0.85rem; color: #8b949e; margin-bottom: 0;">Connect your GitHub account without creating personal access tokens manually. You will receive an 8-character code to enter at GitHub.</p>
-
-        <!-- Dynamic Auth Box -->
-        <div id="copilotAuthBox" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #21262d;">
-          <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
-            <div>
-              <div style="font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em;">Device Code:</div>
-              <div id="copilotUserCode" style="font-size: 1.6rem; font-weight: 700; color: #58a6ff; font-family: ui-monospace, monospace; letter-spacing: 0.1em;">----</div>
-            </div>
-            <button class="btn-sm" onclick="copyCopilotCode(this)" id="copilotCopyBtn">Copy Code</button>
-            <a id="copilotAuthLink" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer" class="btn-sm btn-primary" style="display: inline-flex; align-items: center; gap: 0.35rem;">
-              Open https://github.com/login/device &rarr;
-            </a>
-          </div>
-          <div id="copilotStatusMsg" style="font-size: 0.88rem; color: #d29922; display: flex; align-items: center; gap: 0.4rem;">
-            <span>⏳ Waiting for you to authorize in your browser...</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="step-title">Option B: CLI Device Registration</div>
+      <div class="step-title">Option A: CLI Device Registration (Recommended)</div>
+      <p>Authenticate GitHub Copilot directly from your terminal using the built-in CLI device code flow:</p>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-sh">./bin/babelgate -copilot-login</code></pre>
       </div>
+      <p style="font-size: 0.85rem; color: #8b949e;">Follow the terminal instructions to open GitHub, enter the 8-character code, and authorize. Credentials are securely stored to <code>~/.config/github-copilot/hosts.json</code> and loaded automatically on startup.</p>
 
-      <div class="step-title">Option C: Configuration in config.yaml</div>
+      <div class="step-title">Option B: Configuration in config.yaml</div>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-yaml">providers:
@@ -1910,72 +1793,6 @@ routing:
         }, 2000);
       }).catch(err => {
         console.error('Failed to copy text: ', err);
-      });
-    }
-
-    let copilotPollTimer = null;
-    async function startCopilotRegistration() {
-      const btn = document.getElementById('copilotAuthBtn');
-      const box = document.getElementById('copilotAuthBox');
-      const codeEl = document.getElementById('copilotUserCode');
-      const linkEl = document.getElementById('copilotAuthLink');
-      const statusEl = document.getElementById('copilotStatusMsg');
-
-      btn.disabled = true;
-      btn.textContent = 'Requesting code...';
-
-      try {
-        const resp = await fetch('/api/auth/copilot/device-code', { method: 'POST' });
-        if (!resp.ok) {
-          const err = await resp.json();
-          throw new Error(err.error || 'Failed to request device code');
-        }
-        const data = await resp.json();
-
-        codeEl.textContent = data.user_code;
-        linkEl.href = data.verification_uri || 'https://github.com/login/device';
-        box.style.display = 'block';
-        btn.textContent = 'Code Requested ✓';
-
-        statusEl.innerHTML = '<span style="color: #d29922;">⏳ Waiting for authorization at <a href="' + (data.verification_uri || 'https://github.com/login/device') + '" target="_blank" style="color: #58a6ff;">github.com/login/device</a>...</span>';
-
-        // Auto poll
-        if (copilotPollTimer) clearInterval(copilotPollTimer);
-        copilotPollTimer = setInterval(async () => {
-          try {
-            const pollResp = await fetch('/api/auth/copilot/poll', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ device_code: data.device_code })
-            });
-            const pollData = await pollResp.json();
-            if (pollData.status === 'success') {
-              clearInterval(copilotPollTimer);
-              statusEl.innerHTML = '<span style="color: #3fb950; font-weight: 600;">🎉 Connected successfully as @' + (pollData.username || 'user') + '! GitHub Copilot models are now active.</span>';
-              btn.textContent = 'Connected ✓';
-              btn.style.background = '#238636';
-            } else if (pollData.status === 'error') {
-              clearInterval(copilotPollTimer);
-              statusEl.innerHTML = '<span style="color: #f85149;">❌ ' + (pollData.message || 'Authorization failed') + '</span>';
-              btn.disabled = false;
-              btn.textContent = 'Retry Registration';
-            }
-          } catch (e) {}
-        }, (data.interval || 5) * 1000);
-
-      } catch (err) {
-        btn.disabled = false;
-        btn.textContent = 'Start Device Registration';
-        alert('Error starting device registration: ' + err.message);
-      }
-    }
-
-    function copyCopilotCode(btn) {
-      const code = document.getElementById('copilotUserCode').textContent;
-      navigator.clipboard.writeText(code).then(() => {
-        const orig = btn.textContent;
-        btn.textContent = 'Copied! ✓';
-        setTimeout(() => btn.textContent = orig, 2000);
       });
     }
   </script>
