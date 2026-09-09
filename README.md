@@ -341,9 +341,27 @@ By default `babelgate` renders an interactive terminal UI. For long-running use 
 
 | Flag | Behaviour |
 | :--- | :--- |
-| `-background`, `-d` | No terminal UI. Logs go exclusively to the rotating log file. |
+| `-background`, `-d` | No terminal UI. Logs go exclusively to the rotating log file. Stays in the foreground of your shell. |
 | `-no-tui` | No terminal UI, but keeps logging to the console (useful for Docker, systemd, CI). |
-| `-tray` | **Windows only.** Implies `-background` and adds a system tray icon. |
+| `-tray` | **Detaches into the background** and adds a system tray icon (Windows). Implies `-background`. |
+
+### Detached Background Mode
+
+`-tray` is the only flag that truly daemonizes: it relaunches itself detached from your terminal and hands the prompt straight back.
+
+```bash
+./bin/babelgate -tray
+```
+
+```
+🗼 BabelGate started in background (PID 27888)
+   Dashboard: http://localhost:8080/
+   Log file:  logs/babelgate.log
+```
+
+The gateway keeps running after you close the terminal. Startup problems — a missing config, an unwritable log file — are still reported on the console before it detaches, so a failed start is never silent.
+
+To stop it, use the tray menu on Windows, or `kill <PID>` elsewhere; either way the shutdown is graceful.
 
 ### Windows System Tray
 
@@ -351,21 +369,18 @@ By default `babelgate` renders an interactive terminal UI. For long-running use 
 .\bin\babelgate.exe -tray
 ```
 
-BabelGate places an icon in the notification area. Right-click (or left-click) it for a menu:
+BabelGate places an icon in the notification area. Click it for a menu:
 
 - **Open Dashboard** — opens `http://localhost:<port>/` in your default browser
-- **Open Setup** — opens the provider configuration page
 - **Quit BabelGate** — shuts the gateway down gracefully
 
 Double-clicking the icon opens the dashboard directly. The icon is restored automatically if Explorer restarts.
-
-When launched from Explorer or a shortcut, the console window is closed once startup succeeds — so nothing lingers on screen. Startup failures (a bad config, an unwritable log file) are still printed before the console goes away. Launching from an existing terminal leaves that terminal alone.
 
 > [!TIP]
 > To start BabelGate with Windows, put a shortcut to `babelgate.exe -tray` in
 > `shell:startup` (press <kbd>Win</kbd>+<kbd>R</kbd>, type `shell:startup`).
 
-On macOS and Linux `-tray` is accepted but degrades to plain `-background`, with a note in the log. There is no menu bar / app indicator implementation.
+On macOS and Linux `-tray` still detaches into the background, but there is no menu bar / app indicator icon — a note is written to the log saying so.
 
 ---
 
@@ -512,6 +527,7 @@ babelgate/
 ├── pkg/
 │   ├── canonical/      # Normalized data structures & streaming event bus
 │   ├── config/         # YAML config parsing & environment variable expansion
+│   ├── daemon/         # Detached background process launcher
 │   ├── providers/      # Upstream drivers (Anthropic, Copilot, Google, OpenAI)
 │   ├── router/         # Model catalog, alias routing & fallback engine
 │   ├── server/         # Inbound HTTP protocol handlers & SSE multiplexers

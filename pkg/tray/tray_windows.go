@@ -94,8 +94,7 @@ const (
 
 	// Menu command identifiers.
 	cmdDashboard = 1
-	cmdSetup     = 2
-	cmdQuit      = 3
+	cmdQuit      = 2
 )
 
 type point struct {
@@ -320,8 +319,6 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		switch uint32(wParam & 0xFFFF) {
 		case cmdDashboard:
 			openURL(st.opts.DashboardURL)
-		case cmdSetup:
-			openURL(st.opts.SetupURL)
 		case cmdQuit:
 			st.quit()
 		}
@@ -379,9 +376,6 @@ func (st *trayState) showMenu() {
 	defer procDestroyMenu.Call(hmenu)
 
 	appendMenuItem(hmenu, cmdDashboard, "Open Dashboard")
-	if st.opts.SetupURL != "" {
-		appendMenuItem(hmenu, cmdSetup, "Open Setup")
-	}
 	procAppendMenu.Call(hmenu, mfSeparator, 0, 0)
 	appendMenuItem(hmenu, cmdQuit, "Quit BabelGate")
 

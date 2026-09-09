@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/config"
+	"github.com/vogler75/babel-gate/pkg/daemon"
 	"github.com/vogler75/babel-gate/pkg/logger"
 	"github.com/vogler75/babel-gate/pkg/providers/copilot"
 	"github.com/vogler75/babel-gate/pkg/router"
@@ -117,6 +118,21 @@ func main() {
 		log.Fatalf("Failed to initialize rotating log file %s: %v", cfg.Logging.File, err)
 	}
 	defer rotator.Close()
+
+	// -tray detaches into the background so the terminal is handed straight
+	// back. This happens only after the config and the log file have been
+	// validated above, so those errors are still reported on the console;
+	// everything from here on is only visible in the log file.
+	if *trayMode && !daemon.IsChild() {
+		pid, err := daemon.Detach()
+		if err != nil {
+			log.Fatalf("Failed to start in background: %v", err)
+		}
+		fmt.Printf("🗼 BabelGate started in background (PID %d)\n", pid)
+		fmt.Printf("   Dashboard: http://localhost:%d/\n", cfg.Server.Port)
+		fmt.Printf("   Log file:  %s\n", cfg.Logging.File)
+		return
+	}
 
 	// Determine UI mode: TUI vs Background/Headless
 	interactiveTerm := tui.IsTerminal()
@@ -242,12 +258,11 @@ func main() {
 			<-stop
 			trayCancel()
 		}()
-		base := fmt.Sprintf("http://localhost:%d", cfg.Server.Port)
-		log.Printf("Tray icon active (dashboard: %s/)", base)
+		dashboardURL := fmt.Sprintf("http://localhost:%d/", cfg.Server.Port)
+		log.Printf("Tray icon active (dashboard: %s)", dashboardURL)
 		if err := tray.Run(trayCtx, tray.Options{
 			Tooltip:      fmt.Sprintf("BabelGate - port %d", cfg.Server.Port),
-			DashboardURL: base + "/",
-			SetupURL:     base + "/setup",
+			DashboardURL: dashboardURL,
 			OnQuit:       trayCancel,
 		}); err != nil {
 			log.Printf("Tray unavailable (%v); waiting for termination signal instead", err)

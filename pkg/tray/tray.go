@@ -20,9 +20,6 @@ type Options struct {
 	Tooltip string
 	// DashboardURL is opened by the "Open Dashboard" menu item.
 	DashboardURL string
-	// SetupURL is opened by the "Open Setup" menu item. Optional; the item is
-	// omitted when empty.
-	SetupURL string
 	// OnQuit is invoked when the user picks "Quit". Run returns afterwards.
 	OnQuit func()
 }
