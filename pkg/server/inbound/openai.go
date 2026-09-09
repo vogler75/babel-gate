@@ -11,6 +11,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/providers/openai"
 	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
 
@@ -30,6 +31,7 @@ func NewOpenAIHandler(engine *router.Engine, catalog *router.Catalog, sessions *
 
 func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	tr := trace.FromContext(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -47,6 +49,12 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if tr != nil {
+		tr.SetReadDuration(time.Since(startTime))
+		prov, endpoint, targetModel := h.engine.ResolveRouteInfo(canonReq.Model)
+		tr.SetRoute(canonReq.Model, prov, endpoint, targetModel)
+	}
+
 	sess := ResolveSession(h.sessions, r)
 
 	if !req.Stream {
@@ -58,7 +66,12 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 
 func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
+	tr := trace.FromContext(r.Context())
+	execStart := time.Now()
 	resp, err := h.engine.Execute(r.Context(), canonReq)
+	if tr != nil {
+		tr.SetUpstreamDuration(time.Since(execStart))
+	}
 	durationMs := time.Since(startTime).Milliseconds()
 	estInTokens := session.EstimateRequestTokens(canonReq)
 
@@ -85,6 +98,10 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
 	}
 
 	if sess != nil && h.sessions != nil {
@@ -180,7 +197,11 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	// Initial role event
 	sendChunk(map[string]any{"role": "assistant"}, nil)
 
+	tr := trace.FromContext(r.Context())
 	for ev := range eventsChan {
+		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
+			tr.MarkFirstToken()
+		}
 		candidateIndex = ev.CandidateIndex
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
@@ -276,6 +297,11 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
+		tr.MarkStreamDone()
+	}
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{

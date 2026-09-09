@@ -41,8 +41,10 @@ func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient 
 	}
 }
 
-func (c *Client) Name() string { return c.name }
-func (c *Client) Type() string { return "openai" }
+func (c *Client) Name() string     { return c.name }
+func (c *Client) Type() string     { return "openai" }
+func (c *Client) Endpoint() string { return c.baseURL }
+func (c *Client) BaseURL() string  { return c.baseURL }
 
 func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
 	if c.apiKey != "" && !strings.HasPrefix(c.apiKey, "${") {

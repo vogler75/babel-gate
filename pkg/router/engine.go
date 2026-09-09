@@ -14,6 +14,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/providers/copilot"
 	"github.com/vogler75/babel-gate/pkg/providers/google"
 	"github.com/vogler75/babel-gate/pkg/providers/openai"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 )
 
 type ResolvedRoute struct {
@@ -279,6 +280,15 @@ func (e *Engine) ResolveTrackingModel(requestedModel string) (string, string) {
 	return provName, provName + "/" + cleanModel
 }
 
+// ResolveRouteInfo returns the resolved provider name, destination endpoint, and target model.
+func (e *Engine) ResolveRouteInfo(requestedModel string) (provider, endpoint, targetModel string) {
+	route, err := e.ResolveModel(requestedModel)
+	if err != nil || route.Provider == nil {
+		return "unknown", "", requestedModel
+	}
+	return route.Provider.Name(), route.Provider.Endpoint(), route.TargetModel
+}
+
 // ResolveProviderName returns the resolved provider name for a model, or "unknown" if unresolved.
 func (e *Engine) ResolveProviderName(model string) string {
 	prov, _ := e.ResolveTrackingModel(model)
@@ -319,6 +329,10 @@ func (e *Engine) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 			targetReq.Model = fbRoute.TargetModel
 			fbResp, err2 := fbRoute.Provider.Execute(ctx, &targetReq)
 			if err2 == nil {
+				if tr := trace.FromContext(ctx); tr != nil {
+					tr.AddNote(fmt.Sprintf("fallback to %s", fb))
+					tr.SetRoute(req.Model, fbRoute.Provider.Name(), fbRoute.Provider.Endpoint(), fbRoute.TargetModel)
+				}
 				return fbResp, nil
 			}
 		}
@@ -337,7 +351,31 @@ func (e *Engine) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	targetReq := *req
 	targetReq.Model = route.TargetModel
 
-	return route.Provider.Stream(ctx, &targetReq)
+	ch, err := route.Provider.Stream(ctx, &targetReq)
+	if err == nil {
+		return ch, nil
+	}
+
+	// Check fallbacks
+	if fallbacks, ok := e.cfg.Routing.Fallbacks[req.Model]; ok {
+		for _, fb := range fallbacks {
+			fbRoute, fbErr := e.ResolveModel(fb)
+			if fbErr != nil {
+				continue
+			}
+			targetReq.Model = fbRoute.TargetModel
+			fbCh, err2 := fbRoute.Provider.Stream(ctx, &targetReq)
+			if err2 == nil {
+				if tr := trace.FromContext(ctx); tr != nil {
+					tr.AddNote(fmt.Sprintf("fallback to %s", fb))
+					tr.SetRoute(req.Model, fbRoute.Provider.Name(), fbRoute.Provider.Endpoint(), fbRoute.TargetModel)
+				}
+				return fbCh, nil
+			}
+		}
+	}
+
+	return nil, err
 }
 
 // GetProviders returns all registered providers.

@@ -12,6 +12,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/providers/google"
 	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
 
@@ -44,6 +45,7 @@ func extractModelFromPath(path string, action string) string {
 
 func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	tr := trace.FromContext(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -67,11 +69,21 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if tr != nil {
+		tr.SetReadDuration(time.Since(startTime))
+		prov, endpoint, targetModel := h.engine.ResolveRouteInfo(canonReq.Model)
+		tr.SetRoute(canonReq.Model, prov, endpoint, targetModel)
+	}
+
 	sess := ResolveSession(h.sessions, r)
 	estInTokens := session.EstimateRequestTokens(canonReq)
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 
+	execStart := time.Now()
 	resp, err := h.engine.Execute(r.Context(), canonReq)
+	if tr != nil {
+		tr.SetUpstreamDuration(time.Since(execStart))
+	}
 	durationMs := time.Since(startTime).Milliseconds()
 
 	if err != nil {
@@ -97,6 +109,10 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
 	}
 
 	if sess != nil && h.sessions != nil {
@@ -125,6 +141,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	tr := trace.FromContext(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -146,6 +163,12 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	if err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
+	}
+
+	if tr != nil {
+		tr.SetReadDuration(time.Since(startTime))
+		prov, endpoint, targetModel := h.engine.ResolveRouteInfo(canonReq.Model)
+		tr.SetRoute(canonReq.Model, prov, endpoint, targetModel)
 	}
 
 	sess := ResolveSession(h.sessions, r)
@@ -190,6 +213,9 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	var streamErr string
 
 	for ev := range completeToolStream(ctx, eventsChan) {
+		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
+			tr.MarkFirstToken()
+		}
 		if ev.Type == canonical.EventError {
 			streamStatus = "error"
 			if ev.Error != nil {
@@ -295,6 +321,11 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	}
 	if inTokens == 0 {
 		inTokens = estInTokens
+	}
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
+		tr.MarkStreamDone()
 	}
 
 	if sess != nil && h.sessions != nil {

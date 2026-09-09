@@ -42,8 +42,9 @@ func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient 
 	}
 }
 
-func (c *Client) Name() string { return c.name }
-func (c *Client) Type() string { return "anthropic" }
+func (c *Client) Name() string     { return c.name }
+func (c *Client) Type() string     { return "anthropic" }
+func (c *Client) Endpoint() string { return c.baseURL }
 
 func (c *Client) BaseURL() string {
 	return c.baseURL

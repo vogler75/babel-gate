@@ -18,12 +18,14 @@ import (
 	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 )
 
 type mockUpstreamGoogle struct{}
 
-func (m *mockUpstreamGoogle) Name() string { return "google" }
-func (m *mockUpstreamGoogle) Type() string { return "google" }
+func (m *mockUpstreamGoogle) Name() string     { return "google" }
+func (m *mockUpstreamGoogle) Type() string     { return "google" }
+func (m *mockUpstreamGoogle) Endpoint() string { return "https://mock.google.com" }
 
 func (m *mockUpstreamGoogle) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
 	return &canonical.CanonicalResponse{
@@ -70,8 +72,9 @@ func (m *mockUpstreamGoogle) ListModels(ctx context.Context) ([]providers.ModelI
 
 type mockUpstreamOpenAI struct{}
 
-func (m *mockUpstreamOpenAI) Name() string { return "openai" }
-func (m *mockUpstreamOpenAI) Type() string { return "openai" }
+func (m *mockUpstreamOpenAI) Name() string     { return "openai" }
+func (m *mockUpstreamOpenAI) Type() string     { return "openai" }
+func (m *mockUpstreamOpenAI) Endpoint() string { return "https://mock.openai.com" }
 
 func (m *mockUpstreamOpenAI) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
 	return &canonical.CanonicalResponse{
@@ -747,6 +750,46 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 	if !strings.Contains(logged, "sess: test-session…") {
 		t.Errorf("expected log to contain truncated session ID, got: %s", logged)
+	}
+}
+
+func TestLoggingMiddlewareWithTrace(t *testing.T) {
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(origWriter)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tr := trace.FromContext(r.Context())
+		if tr != nil {
+			tr.SetRoute("claude-3-7-sonnet", "copilot", "https://api.githubcopilot.com", "claude-3-7-sonnet")
+			tr.SetReadDuration(12 * time.Millisecond)
+			tr.MarkFirstToken()
+			tr.SetTokens(1500, 320)
+			tr.MarkStreamDone()
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	handler := loggingMiddleware(next)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	logged := buf.String()
+	if !strings.Contains(logged, "[claude-3-7-sonnet via copilot -> https://api.githubcopilot.com: 1,500 in / 320 out]") {
+		t.Errorf("expected log to contain route and destination, got: %s", logged)
+	}
+	if !strings.Contains(logged, "read: 12ms") {
+		t.Errorf("expected log to contain read duration, got: %s", logged)
+	}
+	if !strings.Contains(logged, "ttft:") {
+		t.Errorf("expected log to contain ttft, got: %s", logged)
+	}
+	if !strings.Contains(logged, "stream:") {
+		t.Errorf("expected log to contain stream duration, got: %s", logged)
 	}
 }
 

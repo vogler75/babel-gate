@@ -15,8 +15,9 @@ type mockProvider struct {
 	models []providers.ModelInfo
 }
 
-func (m *mockProvider) Name() string { return m.name }
-func (m *mockProvider) Type() string { return m.pType }
+func (m *mockProvider) Name() string     { return m.name }
+func (m *mockProvider) Type() string     { return m.pType }
+func (m *mockProvider) Endpoint() string { return "http://mock" }
 func (m *mockProvider) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
 	return &canonical.CanonicalResponse{
 		ID:    "resp-1",

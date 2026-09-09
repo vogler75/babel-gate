@@ -18,6 +18,7 @@ type ModelInfo struct {
 type Provider interface {
 	Name() string
 	Type() string
+	Endpoint() string
 	Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error)
 	Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error)
 	ListModels(ctx context.Context) ([]ModelInfo, error)

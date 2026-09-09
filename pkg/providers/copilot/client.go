@@ -48,8 +48,10 @@ func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient 
 	}
 }
 
-func (c *Client) Name() string { return c.name }
-func (c *Client) Type() string { return "copilot" }
+func (c *Client) Name() string     { return c.name }
+func (c *Client) Type() string     { return "copilot" }
+func (c *Client) Endpoint() string { return c.getBaseURL() }
+func (c *Client) BaseURL() string  { return c.getBaseURL() }
 
 // ensureSessionToken returns a valid Copilot session token and base URL, refreshing if necessary.
 func (c *Client) ensureSessionToken(ctx context.Context, clientAuthToken string) (string, string, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/metrics"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/server/inbound"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/server/web"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
@@ -185,9 +186,50 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
+		tr := trace.New(r.Method, r.URL.Path)
+		r = r.WithContext(trace.WithTrace(r.Context(), tr))
 
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+
+		// Progress monitor for long-running requests (> 15s)
+		stopMonitor := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopMonitor:
+					return
+				case <-ticker.C:
+					if tr.IsDone() {
+						return
+					}
+					modelDesc, destination, hasToken, elapsed, outTokens := tr.ProgressInfo()
+					if modelDesc != "" {
+						destStr := ""
+						if destination != "" {
+							destStr = " -> " + destination
+						}
+						if !hasToken {
+							log.Printf("[WAIT] [%s] %s (%s%s) waiting for upstream response (%s elapsed)...",
+								r.Method, r.URL.Path, modelDesc, destStr, trace.FormatDuration(elapsed))
+						} else {
+							tokenStr := ""
+							if outTokens > 0 {
+								tokenStr = fmt.Sprintf(" (~%d tokens)", outTokens)
+							}
+							log.Printf("[STREAM] [%s] %s (%s%s) still streaming: %s elapsed%s...",
+								r.Method, r.URL.Path, modelDesc, destStr, trace.FormatDuration(elapsed), tokenStr)
+						}
+					}
+				}
+			}
+		}()
+
+		next.ServeHTTP(sw, r)
+		close(stopMonitor)
+
+		duration := time.Since(start)
 		clientName := session.DetectClient(r.Header.Get("x-client"), r.UserAgent())
 		sessID := inbound.ExtractSessionID(r)
 
@@ -208,7 +250,10 @@ func loggingMiddleware(next http.Handler) http.Handler {
 			clientMeta = fmt.Sprintf(" (%s)", strings.Join(clientInfo, ", "))
 		}
 
-		log.Printf("[%s] %s -> %d %s%s took %v", r.Method, r.URL.Path, sw.status, r.RemoteAddr, clientMeta, time.Since(start))
+		routeInfo := tr.FormatRoute()
+		breakdown := tr.FormatBreakdown()
+
+		log.Printf("[%s] %s -> %d %s%s%s took %v%s", r.Method, r.URL.Path, sw.status, r.RemoteAddr, clientMeta, routeInfo, duration, breakdown)
 	})
 }
 

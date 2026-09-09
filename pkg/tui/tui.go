@@ -51,6 +51,7 @@ type TUI struct {
 	ring       *logger.RingBuffer
 	startTime  time.Time
 	scrollPos  int // 0 means bottom (auto-scroll), >0 means scrolled up by N lines
+	hScrollPos int // 0 means left edge, >0 means scrolled right by N columns
 	autoScroll bool
 	stopChan   chan struct{}
 	origTerm   *term.State
@@ -227,6 +228,18 @@ func (t *TUI) handleKey(key string) bool {
 			t.autoScroll = true
 		}
 
+	case "right", "l":
+		t.hScrollPos += 8
+
+	case "left", "h":
+		t.hScrollPos -= 8
+		if t.hScrollPos < 0 {
+			t.hScrollPos = 0
+		}
+
+	case "0":
+		t.hScrollPos = 0
+
 	case "pageup":
 		t.scrollPos += 10
 		t.autoScroll = false
@@ -252,6 +265,7 @@ func (t *TUI) handleKey(key string) bool {
 		if t.ring != nil {
 			t.ring.Clear()
 			t.scrollPos = 0
+			t.hScrollPos = 0
 			t.autoScroll = true
 		}
 
@@ -328,8 +342,15 @@ func (t *TUI) render() {
 
 	// 3. Lower Section: Live Request Logs
 	logHeaderTitle := " Live Request Logs "
+	var scrollIndicators []string
 	if !t.autoScroll && t.scrollPos > 0 {
-		logHeaderTitle = fmt.Sprintf(" Live Request Logs [%sPAUSED: Scrolled +%d%s] ", colorYellow+colorBold, t.scrollPos, colorReset)
+		scrollIndicators = append(scrollIndicators, fmt.Sprintf("PAUSED: +%d lines", t.scrollPos))
+	}
+	if t.hScrollPos > 0 {
+		scrollIndicators = append(scrollIndicators, fmt.Sprintf("Col +%d", t.hScrollPos))
+	}
+	if len(scrollIndicators) > 0 {
+		logHeaderTitle = fmt.Sprintf(" Live Request Logs [%s%s%s] ", colorYellow+colorBold, strings.Join(scrollIndicators, ", "), colorReset)
 	}
 	sb.WriteString(t.renderDivider(logHeaderTitle, width))
 	sb.WriteString("\r\n")
@@ -348,11 +369,13 @@ func (t *TUI) render() {
 		allLines = t.ring.Lines()
 	}
 
+	inner := width - 2
 	logSlice := t.computeVisibleLogs(allLines, logHeight)
 	for i := 0; i < logHeight; i++ {
 		lineContent := ""
 		if i < len(logSlice) {
-			lineContent = colorizeLogLine(logSlice[i])
+			colored := colorizeLogLine(logSlice[i])
+			lineContent = sliceLogLine(colored, t.hScrollPos, inner)
 		}
 		sb.WriteString(t.renderBoxLine(lineContent, width))
 		sb.WriteString("\r\n")
@@ -363,7 +386,7 @@ func (t *TUI) render() {
 	sb.WriteString("\r\n")
 
 	// 4. Footer Shortcuts
-	footer := fmt.Sprintf(" %sq%s: Quit │ %s↑/↓/PgUp/PgDn%s: Scroll │ %sEnd%s: Auto-Scroll │ %sc%s: Clear │ %sr%s: Redraw",
+	footer := fmt.Sprintf(" %sq%s: Quit │ %s↑/↓/←/→%s: Scroll │ %sEnd%s: Auto-Scroll │ %sc%s: Clear │ %sr%s: Redraw",
 		colorBold, colorReset,
 		colorBold, colorReset,
 		colorBold, colorReset,
@@ -635,6 +658,90 @@ func truncateToVisualWidth(s string, maxCells int) string {
 		b.WriteRune(r)
 		curWidth += w
 	}
+	b.WriteString(colorReset)
+	return b.String()
+}
+
+// sliceLogLine slices s horizontally starting at visual column hScroll up to maxCells visual width,
+// preserving active ANSI color sequences and wide characters.
+func sliceLogLine(s string, hScroll int, maxCells int) string {
+	if maxCells <= 0 {
+		return ""
+	}
+	if hScroll < 0 {
+		hScroll = 0
+	}
+
+	var b strings.Builder
+	inEsc := false
+	curCol := 0
+	visibleCells := 0
+	runes := []rune(s)
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '\033' {
+			inEsc = true
+			b.WriteRune(r)
+			continue
+		}
+		if inEsc {
+			b.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+
+		w := runeWidth(r)
+
+		// Character completely before horizontal scroll offset
+		if curCol+w <= hScroll {
+			curCol += w
+			continue
+		}
+
+		// Character straddles the left scroll boundary (e.g. wide rune)
+		if curCol < hScroll {
+			if visibleCells < maxCells {
+				b.WriteByte(' ')
+				visibleCells++
+			}
+			curCol += w
+			continue
+		}
+
+		curCol += w
+
+		// Would adding this character exceed maxCells?
+		if visibleCells+w > maxCells {
+			if visibleCells < maxCells {
+				b.WriteString("…")
+				visibleCells++
+			}
+			break
+		}
+
+		// If this character reaches maxCells, check if there's more visible text after
+		if visibleCells+w == maxCells && i+1 < len(runes) {
+			hasMore := false
+			for j := i + 1; j < len(runes); j++ {
+				if runes[j] != '\033' && runeWidth(runes[j]) > 0 {
+					hasMore = true
+					break
+				}
+			}
+			if hasMore {
+				b.WriteString("…")
+				visibleCells++
+				break
+			}
+		}
+
+		b.WriteRune(r)
+		visibleCells += w
+	}
+
 	b.WriteString(colorReset)
 	return b.String()
 }

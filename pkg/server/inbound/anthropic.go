@@ -14,6 +14,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/providers/anthropic"
 	"github.com/vogler75/babel-gate/pkg/router"
+	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
 
@@ -33,6 +34,7 @@ func NewAnthropicHandler(engine *router.Engine, catalog *router.Catalog, session
 
 func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	tr := trace.FromContext(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -48,6 +50,12 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
 		return
+	}
+
+	if tr != nil {
+		tr.SetReadDuration(time.Since(startTime))
+		prov, endpoint, targetModel := h.engine.ResolveRouteInfo(req.Model)
+		tr.SetRoute(req.Model, prov, endpoint, targetModel)
 	}
 
 	sess := ResolveSession(h.sessions, r)
@@ -248,12 +256,16 @@ func (h *AnthropicHandler) handlePassthrough(
 	outTokens := 0
 	estInTokens := session.EstimateTokens(string(upstreamBody))
 
+	tr := trace.FromContext(r.Context())
 	if req.Stream {
 		flusher, isFlusher := w.(http.Flusher)
 		reader := bufio.NewReader(upResp.Body)
 		for {
 			line, rErr := reader.ReadBytes('\n')
 			if len(line) > 0 {
+				if tr != nil && !tr.HasFirstToken() && bytes.HasPrefix(line, []byte("data:")) {
+					tr.MarkFirstToken()
+				}
 				if names.Changed() && bytes.HasPrefix(line, []byte("data:")) {
 					payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 					line = append([]byte("data: "), anthropic.RestorePayload(payload, names)...)
@@ -326,6 +338,15 @@ func (h *AnthropicHandler) handlePassthrough(
 	}
 	totalTokens := inTokens + outTokens
 
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
+		if req.Stream {
+			tr.MarkStreamDone()
+		} else {
+			tr.SetUpstreamDuration(time.Since(startTime) - tr.ReadDuration)
+		}
+	}
+
 	status := "success"
 	if upResp.StatusCode >= 400 {
 		status = "error"
@@ -348,7 +369,12 @@ func (h *AnthropicHandler) handlePassthrough(
 
 func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
+	tr := trace.FromContext(r.Context())
+	execStart := time.Now()
 	resp, err := h.engine.Execute(r.Context(), canonReq)
+	if tr != nil {
+		tr.SetUpstreamDuration(time.Since(execStart))
+	}
 	durationMs := time.Since(startTime).Milliseconds()
 	estInTokens := session.EstimateRequestTokens(canonReq)
 
@@ -375,6 +401,10 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
 	}
 
 	if sess != nil && h.sessions != nil {
@@ -482,7 +512,11 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	tr := trace.FromContext(r.Context())
 	for ev := range completeToolStream(ctx, eventsChan) {
+		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
+			tr.MarkFirstToken()
+		}
 		if ev.CandidateIndex != 0 {
 			sendSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": "Anthropic output supports only candidate zero"}})
 			return
@@ -613,6 +647,11 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	sendSSE("message_stop", map[string]any{
 		"type": "message_stop",
 	})
+
+	if tr != nil {
+		tr.SetTokens(inTokens, outTokens)
+		tr.MarkStreamDone()
+	}
 
 	if sess != nil && h.sessions != nil {
 		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
