@@ -189,6 +189,9 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "@ai-sdk/openai-compatible") || !contains(html, "copyOpenCodeConfig") {
 		t.Errorf("expected OpenCode provider JSON and copy control in dashboard HTML")
 	}
+	if !contains(html, "model.provider + '/' + model.id") {
+		t.Errorf("expected OpenCode model name to be formatted as <provider>/<modelname>")
+	}
 	if !contains(html, "modelProviderFilter") || !contains(html, "modelNameFilter") || !contains(html, "filteredCatalogModels") {
 		t.Errorf("expected provider and name filters for the model catalog")
 	}

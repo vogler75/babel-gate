@@ -1227,12 +1227,10 @@ const dashboardHTML = `<!DOCTYPE html>
       const selected = catalogModels.filter(model => selectedOpenCodeModels.has(openCodeModelKey(model)));
       if (selected.length === 0) return;
 
-      const idCounts = {};
-      selected.forEach(model => { idCounts[model.id] = (idCounts[model.id] || 0) + 1; });
       const models = {};
       selected.forEach(model => {
         let modelID = model.id;
-        if (idCounts[model.id] > 1 && model.type !== 'alias' && model.provider) {
+        if (model.type !== 'alias' && model.provider) {
           modelID = model.provider + '/' + model.id;
         }
         models[modelID] = { name: model.type === 'alias' ? model.id : (model.display_name || model.id) };
