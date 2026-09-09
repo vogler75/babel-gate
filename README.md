@@ -366,7 +366,8 @@ GitHub Copilot can be authenticated through three convenient methods:
 - **Live Provider Controls**: Enable or disable configured providers without restarting from either the web dashboard or TUI; changes are written back to the active YAML file. In the TUI, use `Tab`/`Shift-Tab` to focus Providers, Sessions, or Logs, `↑`/`↓` to select or scroll within the focused pane, and `Space` to toggle the selected provider.
 - **Visual Route Editor**: Configure the default route, aliases, and fallback chains from the dashboard.
 - **Online Route Reload**: Re-read routes changed manually in the active YAML file without restarting BabelGate, using the dashboard button, `POST /api/routing`, or `R` in the TUI.
-- **Unified Model Catalog**: Interactive table of all upstream and aliased models.
+- **OpenCode Config Generator**: Select models from the dashboard catalog and generate a copyable `provider.babelgate` JSON fragment using the current dashboard URL.
+- **Unified Model Catalog**: Interactive table of all upstream and aliased models, filterable by provider and model name.
 - **Streaming Prompt Playground**: Test any connected model with live token streaming and duration metrics directly in your browser.
 - **Live Session Telemetry**: View incoming clients (e.g. Claude Code, SDKs), request counts, input/output token usage, duration, and error logs.
 - **Generation Throughput**: Compare output tokens per second for each completed request and session. Streaming throughput excludes time-to-first-token.

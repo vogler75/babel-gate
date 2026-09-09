@@ -119,6 +119,17 @@ func TestSessionsViewShowsTokenSpeed(t *testing.T) {
 	if len(lines) != 2 || !strings.Contains(stripANSI(strings.Join(lines, "\n")), "25.0 tok/s") {
 		t.Fatalf("session token speed not rendered: %q", lines)
 	}
+	var sessionOneLine string
+	for _, line := range lines {
+		plain := strings.TrimSpace(stripANSI(line))
+		if strings.Contains(plain, "ID:session-1") {
+			sessionOneLine = plain
+			break
+		}
+	}
+	if !strings.HasSuffix(sessionOneLine, "ID:session-1") || strings.Index(sessionOneLine, "Test Client") > strings.Index(sessionOneLine, "ID:session-1") {
+		t.Fatalf("session ID should be the last column: %q", sessionOneLine)
+	}
 	app.handleKey("down")
 	if app.sessionSelection != 1 {
 		t.Fatalf("down should select the next session, got %d", app.sessionSelection)

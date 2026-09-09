@@ -180,6 +180,15 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "Reload from YAML") || !contains(html, "reloadRouting") {
 		t.Errorf("expected online route reload control in dashboard HTML")
 	}
+	if !contains(html, "selectAllModels") || !contains(html, "Generate OpenCode Config") || !contains(html, "generateOpenCodeConfig") {
+		t.Errorf("expected selectable models and OpenCode configuration generator in dashboard HTML")
+	}
+	if !contains(html, "@ai-sdk/openai-compatible") || !contains(html, "copyOpenCodeConfig") {
+		t.Errorf("expected OpenCode provider JSON and copy control in dashboard HTML")
+	}
+	if !contains(html, "modelProviderFilter") || !contains(html, "modelNameFilter") || !contains(html, "filteredCatalogModels") {
+		t.Errorf("expected provider and name filters for the model catalog")
+	}
 }
 
 func contains(s, substr string) bool {

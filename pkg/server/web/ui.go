@@ -361,6 +361,12 @@ const dashboardHTML = `<!DOCTYPE html>
     .route-row input { min-width: 0; }
     .route-row select { min-width: 0; }
     .muted { color: #8b949e; font-size: .8rem; }
+    .model-select { width: auto; accent-color: var(--accent); cursor: pointer; }
+    .model-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
+    .model-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-bottom: .75rem; }
+    .model-actions button:disabled { opacity: .5; cursor: not-allowed; }
+    #openCodeConfigPanel { margin-top: 1rem; }
+    #openCodeConfigOutput { max-height: 360px; white-space: pre; }
     
     .token-in { color: var(--stat-in); font-weight: 600; font-family: ui-monospace, monospace; }
     .token-out { color: var(--stat-out); font-weight: 600; font-family: ui-monospace, monospace; }
@@ -597,15 +603,33 @@ const dashboardHTML = `<!DOCTYPE html>
     <!-- Active Models Catalog -->
     <div class="card">
       <h2>Available Models Catalog <span class="badge" id="modelCount">0</span></h2>
+      <div class="model-filters">
+        <select id="modelProviderFilter" aria-label="Filter models by provider" onchange="renderModelCatalog()">
+          <option value="">All providers</option>
+        </select>
+        <input id="modelNameFilter" type="search" aria-label="Filter models by name" placeholder="Search models by name…" oninput="renderModelCatalog()">
+      </div>
+      <div class="model-actions">
+        <span class="muted" id="selectedModelCount">0 models selected</span>
+        <button id="generateOpenCodeButton" class="btn-sm" onclick="generateOpenCodeConfig()" disabled>Generate OpenCode Config</button>
+      </div>
       <div style="overflow-x: auto;">
         <table>
           <thead>
-            <tr><th>Model Identifier</th><th>Provider / Route</th><th>Type</th><th>Description</th></tr>
+            <tr><th><input id="selectAllModels" class="model-select" type="checkbox" aria-label="Select all visible models" title="Select all visible models" onchange="toggleAllOpenCodeModels(this.checked)"></th><th>Model Identifier</th><th>Provider / Route</th><th>Type</th><th>Description</th></tr>
           </thead>
           <tbody id="modelsTable">
-            <tr><td colspan="4">Loading models catalog...</td></tr>
+            <tr><td colspan="5">Loading models catalog...</td></tr>
           </tbody>
         </table>
+      </div>
+      <div id="openCodeConfigPanel" hidden>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:.75rem;">
+          <strong>OpenCode configuration fragment</strong>
+          <button id="copyOpenCodeButton" class="btn-sm" onclick="copyOpenCodeConfig()">Copy JSON</button>
+        </div>
+        <pre id="openCodeConfigOutput"></pre>
+        <div class="muted">Merge this fragment into your <code>opencode.json</code> configuration.</div>
       </div>
     </div>
 
@@ -702,8 +726,10 @@ const dashboardHTML = `<!DOCTYPE html>
 
     let allProviders = [];
     let allModels = [];
+    let catalogModels = [];
     let priorityMap = {};
     let currentRouting = { default: '', routes: {}, fallbacks: {} };
+    const selectedOpenCodeModels = new Set();
     const openDetails = new Set();
 
     function routeInput(value, placeholder, className, list) {
@@ -1086,6 +1112,171 @@ const dashboardHTML = `<!DOCTYPE html>
       });
     }
 
+    function openCodeModelKey(model) {
+      return [model.type || 'native', model.provider || '', model.id || ''].join(':');
+    }
+
+    function filteredCatalogModels() {
+      const provider = document.getElementById('modelProviderFilter').value;
+      const query = document.getElementById('modelNameFilter').value.trim().toLowerCase();
+      return catalogModels.filter(model => {
+        if (provider && model.provider !== provider) return false;
+        if (!query) return true;
+        return String(model.id || '').toLowerCase().includes(query) ||
+          String(model.display_name || '').toLowerCase().includes(query);
+      });
+    }
+
+    function populateModelProviderFilter() {
+      const select = document.getElementById('modelProviderFilter');
+      const previous = select.value;
+      const providers = [];
+      const seen = new Set();
+      catalogModels.forEach(model => {
+        if (model.provider && !seen.has(model.provider)) {
+          seen.add(model.provider);
+          providers.push(model.provider);
+        }
+      });
+      select.innerHTML = '<option value="">All providers</option>';
+      providers.forEach(provider => {
+        const option = document.createElement('option');
+        option.value = provider;
+        option.textContent = provider === 'router-alias' ? 'Aliases / Virtual Routes' : provider.toUpperCase();
+        select.appendChild(option);
+      });
+      select.value = seen.has(previous) ? previous : '';
+    }
+
+    function renderModelCatalog() {
+      const modelBody = document.getElementById('modelsTable');
+      const visibleModels = filteredCatalogModels();
+      modelBody.innerHTML = '';
+      document.getElementById('modelCount').textContent = visibleModels.length === catalogModels.length
+        ? catalogModels.length
+        : visibleModels.length + ' / ' + catalogModels.length;
+
+      if (visibleModels.length === 0) {
+        modelBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#8b949e; padding:1.5rem;">No models match the current filters.</td></tr>';
+        updateOpenCodeSelectionControls();
+        return;
+      }
+
+      visibleModels.forEach(m => {
+        const tr = document.createElement('tr');
+        const isAlias = m.type === 'alias';
+        const providerPillClass = getProviderPillClass(isAlias ? 'alias' : m.provider);
+        const providerCell = isAlias && m.target
+          ? '<span class="pill ' + providerPillClass + '">alias</span> <span style="color: #8b949e; font-size: 0.8rem;">&rarr; ' + escapeHtml(m.target) + '</span>'
+          : '<span class="pill ' + providerPillClass + '">' + escapeHtml(m.provider || 'default') + '</span>';
+        const typeBadge = isAlias
+          ? '<span class="pill pill-alias">alias</span>'
+          : '<span class="badge" style="text-transform: uppercase;">native</span>';
+
+        tr.innerHTML = '<td><code>' + escapeHtml(m.id) + '</code></td>' +
+          '<td>' + providerCell + '</td>' +
+          '<td>' + typeBadge + '</td>' +
+          '<td>' + escapeHtml(m.description || m.display_name || '') + '</td>';
+        const selectCell = document.createElement('td');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'model-select opencode-model-checkbox';
+        checkbox.checked = selectedOpenCodeModels.has(openCodeModelKey(m));
+        checkbox.setAttribute('aria-label', 'Select ' + m.id + ' for OpenCode');
+        checkbox.onchange = () => {
+          const key = openCodeModelKey(m);
+          if (checkbox.checked) selectedOpenCodeModels.add(key);
+          else selectedOpenCodeModels.delete(key);
+          updateOpenCodeSelectionControls();
+        };
+        selectCell.appendChild(checkbox);
+        tr.insertBefore(selectCell, tr.firstChild);
+        modelBody.appendChild(tr);
+      });
+      updateOpenCodeSelectionControls();
+    }
+
+    function updateOpenCodeSelectionControls() {
+      const available = new Set(catalogModels.map(openCodeModelKey));
+      Array.from(selectedOpenCodeModels).forEach(key => {
+        if (!available.has(key)) selectedOpenCodeModels.delete(key);
+      });
+      const selectedCount = selectedOpenCodeModels.size;
+      document.getElementById('selectedModelCount').textContent = selectedCount + (selectedCount === 1 ? ' model selected' : ' models selected');
+      document.getElementById('generateOpenCodeButton').disabled = selectedCount === 0;
+      const selectAll = document.getElementById('selectAllModels');
+      const visibleModels = filteredCatalogModels();
+      const visibleSelected = visibleModels.filter(model => selectedOpenCodeModels.has(openCodeModelKey(model))).length;
+      selectAll.checked = visibleModels.length > 0 && visibleSelected === visibleModels.length;
+      selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visibleModels.length;
+    }
+
+    function toggleAllOpenCodeModels(checked) {
+      filteredCatalogModels().forEach(model => {
+        const key = openCodeModelKey(model);
+        if (checked) selectedOpenCodeModels.add(key);
+        else selectedOpenCodeModels.delete(key);
+      });
+      document.querySelectorAll('.opencode-model-checkbox').forEach(input => { input.checked = checked; });
+      updateOpenCodeSelectionControls();
+    }
+
+    function generateOpenCodeConfig() {
+      const selected = catalogModels.filter(model => selectedOpenCodeModels.has(openCodeModelKey(model)));
+      if (selected.length === 0) return;
+
+      const idCounts = {};
+      selected.forEach(model => { idCounts[model.id] = (idCounts[model.id] || 0) + 1; });
+      const models = {};
+      selected.forEach(model => {
+        let modelID = model.id;
+        if (idCounts[model.id] > 1 && model.type !== 'alias' && model.provider) {
+          modelID = model.provider + '/' + model.id;
+        }
+        models[modelID] = { name: model.type === 'alias' ? model.id : (model.display_name || model.id) };
+      });
+
+      const origin = window.location.origin && window.location.origin !== 'null'
+        ? window.location.origin.replace(/\/$/, '')
+        : 'http://localhost:8080';
+      const fragment = {
+        provider: {
+          babelgate: {
+            name: 'BabelGate',
+            npm: '@ai-sdk/openai-compatible',
+            options: { baseURL: origin + '/v1' },
+            models: models
+          }
+        }
+      };
+      document.getElementById('openCodeConfigOutput').textContent = JSON.stringify(fragment, null, 2);
+      document.getElementById('openCodeConfigPanel').hidden = false;
+    }
+
+    async function copyOpenCodeConfig() {
+      const text = document.getElementById('openCodeConfigOutput').textContent;
+      const button = document.getElementById('copyOpenCodeButton');
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }
+        button.textContent = 'Copied! ✓';
+        setTimeout(() => { button.textContent = 'Copy JSON'; }, 2000);
+      } catch (err) {
+        button.textContent = 'Copy failed';
+        setTimeout(() => { button.textContent = 'Copy JSON'; }, 2000);
+      }
+    }
+
     async function loadData() {
       try {
         const [statusRes, modelsRes, routingRes] = await Promise.all([
@@ -1163,10 +1354,7 @@ const dashboardHTML = `<!DOCTYPE html>
         }
 
         // Models table - deduplicate and strip provider prefix
-        const modelBody = document.getElementById('modelsTable');
-        modelBody.innerHTML = '';
-
-        const displayedModels = [];
+        catalogModels = [];
         const seenInTable = new Set();
         allModels.forEach(m => {
           let cleanId = m.id;
@@ -1176,13 +1364,13 @@ const dashboardHTML = `<!DOCTYPE html>
           const dedupeKey = (m.provider || '') + ':' + cleanId;
           if (seenInTable.has(dedupeKey)) return;
           seenInTable.add(dedupeKey);
-          displayedModels.push({
+          catalogModels.push({
             ...m,
             id: cleanId
           });
         });
 
-        displayedModels.sort((a, b) => {
+        catalogModels.sort((a, b) => {
           const pA = priorityMap[a.provider] !== undefined ? priorityMap[a.provider] : (a.type === 'alias' ? 999 : 100);
           const pB = priorityMap[b.provider] !== undefined ? priorityMap[b.provider] : (b.type === 'alias' ? 999 : 100);
           if (pA !== pB) return pA - pB;
@@ -1192,25 +1380,8 @@ const dashboardHTML = `<!DOCTYPE html>
           return String(a.id || '').localeCompare(String(b.id || ''));
         });
 
-        document.getElementById('modelCount').textContent = displayedModels.length;
-
-        displayedModels.forEach(m => {
-          const tr = document.createElement('tr');
-          const isAlias = m.type === 'alias';
-          const providerPillClass = getProviderPillClass(isAlias ? 'alias' : m.provider);
-          const providerCell = isAlias && m.target
-            ? '<span class="pill ' + providerPillClass + '">alias</span> <span style="color: #8b949e; font-size: 0.8rem;">&rarr; ' + escapeHtml(m.target) + '</span>'
-            : '<span class="pill ' + providerPillClass + '">' + escapeHtml(m.provider || 'default') + '</span>';
-          const typeBadge = isAlias
-            ? '<span class="pill pill-alias">alias</span>'
-            : '<span class="badge" style="text-transform: uppercase;">native</span>';
-
-          tr.innerHTML = '<td><code>' + escapeHtml(m.id) + '</code></td>' +
-            '<td>' + providerCell + '</td>' +
-            '<td>' + typeBadge + '</td>' +
-            '<td>' + escapeHtml(m.description || m.display_name || '') + '</td>';
-          modelBody.appendChild(tr);
-        });
+        populateModelProviderFilter();
+        renderModelCatalog();
 
         // Populate Model dropdown
         onProviderChange();
