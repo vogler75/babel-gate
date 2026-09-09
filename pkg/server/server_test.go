@@ -753,6 +753,31 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareSkipsDashboardAPI(t *testing.T) {
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(origWriter)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := loggingMiddleware(next)
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if logged := buf.String(); logged != "" {
+		t.Errorf("expected dashboard API request not to be logged, got: %s", logged)
+	}
+}
+
 func TestLoggingMiddlewareWithTrace(t *testing.T) {
 	var buf bytes.Buffer
 	origWriter := log.Writer()
@@ -792,6 +817,3 @@ func TestLoggingMiddlewareWithTrace(t *testing.T) {
 		t.Errorf("expected log to contain stream duration, got: %s", logged)
 	}
 }
-
-
-

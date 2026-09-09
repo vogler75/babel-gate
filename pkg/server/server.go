@@ -189,6 +189,13 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // loggingMiddleware logs HTTP request details.
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Dashboard API polling is internal UI traffic and would otherwise drown
+		// out the LLM API requests that are useful in the request log.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
 		tr := trace.New(r.Method, r.URL.Path)
 		r = r.WithContext(trace.WithTrace(r.Context(), tr))
