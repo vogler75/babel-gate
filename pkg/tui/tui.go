@@ -634,7 +634,11 @@ func (t *TUI) getSessionsInfo(limit int) []string {
 			age = 0
 		}
 		model := "-"
-		if len(sess.Models) > 0 {
+		if sess.LastModel != "" {
+			model = sess.LastModel
+		} else if len(sess.RecentRequests) > 0 && sess.RecentRequests[0].Model != "" {
+			model = sess.RecentRequests[0].Model
+		} else if len(sess.Models) > 0 {
 			model = sess.Models[len(sess.Models)-1]
 		}
 		rate := "—"

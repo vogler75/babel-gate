@@ -199,6 +199,7 @@ func TestStore_SessionPersistence(t *testing.T) {
 		UserAgent:              "claude-code/1.0",
 		CreatedAt:              now.Add(-10 * time.Minute),
 		LastActive:             now,
+		LastModel:              "openai/gpt-4o",
 		RequestCount:           2,
 		ContextTokens:          150,
 		ContextTokensEstimated: false,
@@ -209,6 +210,10 @@ func TestStore_SessionPersistence(t *testing.T) {
 		GenerationDurationMs:   4000,
 		MeasuredOutputTokens:   100,
 		Models:                 []string{"google/gemini-2.5-pro", "openai/gpt-4o"},
+		ModelStats: map[string]*session.ModelUsage{
+			"google/gemini-2.5-pro": {Model: "google/gemini-2.5-pro", RequestCount: 1, InputTokens: 150, OutputTokens: 50, TotalTokens: 200, PercentReq: 50, PercentTok: 50},
+			"openai/gpt-4o":         {Model: "openai/gpt-4o", RequestCount: 1, InputTokens: 150, OutputTokens: 50, TotalTokens: 200, PercentReq: 50, PercentTok: 50},
+		},
 	}
 
 	if err := store.SaveSession(sess); err != nil {
@@ -269,6 +274,15 @@ func TestStore_SessionPersistence(t *testing.T) {
 	}
 	if loadedSess.TotalTokens != 400 {
 		t.Errorf("expected 400 total tokens, got %d", loadedSess.TotalTokens)
+	}
+	if loadedSess.LastModel != "openai/gpt-4o" {
+		t.Errorf("expected LastModel openai/gpt-4o, got %s", loadedSess.LastModel)
+	}
+	if len(loadedSess.ModelStats) != 2 {
+		t.Fatalf("expected 2 ModelStats, got %d", len(loadedSess.ModelStats))
+	}
+	if loadedSess.ModelStats["openai/gpt-4o"].RequestCount != 1 {
+		t.Errorf("expected gpt-4o request count 1, got %d", loadedSess.ModelStats["openai/gpt-4o"].RequestCount)
 	}
 	if len(loadedSess.Models) != 2 {
 		t.Fatalf("expected 2 models, got %d", len(loadedSess.Models))

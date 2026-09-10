@@ -46,25 +46,39 @@ type RequestRecord struct {
 	ErrorMessage         string    `json:"error_message,omitempty"`
 }
 
+// ModelUsage tracks aggregate usage for a specific model within a session.
+type ModelUsage struct {
+	Model        string    `json:"model"`
+	RequestCount int       `json:"request_count"`
+	InputTokens  int       `json:"input_tokens"`
+	OutputTokens int       `json:"output_tokens"`
+	TotalTokens  int       `json:"total_tokens"`
+	PercentReq   float64   `json:"percent_req"` // Percentage of total session requests (0-100)
+	PercentTok   float64   `json:"percent_tok"` // Percentage of total session tokens (0-100)
+	LastUsed     time.Time `json:"last_used"`
+}
+
 // Session tracks an ongoing client conversation/session and its aggregated token usage.
 type Session struct {
-	ID                     string    `json:"id"`
-	Client                 string    `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
-	ClientIP               string    `json:"client_ip,omitempty"`
-	UserAgent              string    `json:"user_agent,omitempty"`
-	CreatedAt              time.Time `json:"created_at"`
-	LastActive             time.Time `json:"last_active"`
-	RequestCount           int       `json:"request_count"`
-	ContextTokens          int       `json:"context_tokens"` // input tokens in the most recent request
-	ContextTokensEstimated bool      `json:"context_tokens_estimated,omitempty"`
-	InputTokens            int       `json:"input_tokens"`
-	OutputTokens           int       `json:"output_tokens"`
-	TotalTokens            int       `json:"total_tokens"`
-	TokensPerSecond        float64   `json:"tokens_per_second"`
-	GenerationDurationMs   int64     `json:"-"`
-	MeasuredOutputTokens   int       `json:"-"`
-	Models                 []string        `json:"models"`
-	RecentRequests         []RequestRecord `json:"recent_requests,omitempty"`
+	ID                     string                 `json:"id"`
+	Client                 string                 `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
+	ClientIP               string                 `json:"client_ip,omitempty"`
+	UserAgent              string                 `json:"user_agent,omitempty"`
+	CreatedAt              time.Time              `json:"created_at"`
+	LastActive             time.Time              `json:"last_active"`
+	LastModel              string                 `json:"last_model,omitempty"`
+	RequestCount           int                    `json:"request_count"`
+	ContextTokens          int                    `json:"context_tokens"` // input tokens in the most recent request
+	ContextTokensEstimated bool                   `json:"context_tokens_estimated,omitempty"`
+	InputTokens            int                    `json:"input_tokens"`
+	OutputTokens           int                    `json:"output_tokens"`
+	TotalTokens            int                    `json:"total_tokens"`
+	TokensPerSecond        float64                `json:"tokens_per_second"`
+	GenerationDurationMs   int64                  `json:"-"`
+	MeasuredOutputTokens   int                    `json:"-"`
+	Models                 []string               `json:"models"`
+	ModelStats             map[string]*ModelUsage `json:"model_stats,omitempty"`
+	RecentRequests         []RequestRecord        `json:"recent_requests,omitempty"`
 }
 
 // Summary provides aggregate metrics across all tracked sessions.
@@ -197,6 +211,7 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 			CreatedAt:      now,
 			LastActive:     now,
 			Models:         make([]string, 0),
+			ModelStats:     make(map[string]*ModelUsage),
 			RecentRequests: make([]RequestRecord, 0),
 		}
 		m.sessions[sessionID] = newSess
@@ -230,6 +245,7 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 		CreatedAt:      now,
 		LastActive:     now,
 		Models:         make([]string, 0),
+		ModelStats:     make(map[string]*ModelUsage),
 		RecentRequests: make([]RequestRecord, 0),
 	}
 	m.sessions[newID] = newSess
@@ -298,8 +314,34 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		s.TokensPerSecond = float64(s.MeasuredOutputTokens) * 1000 / float64(s.GenerationDurationMs)
 	}
 
-	// Track model if not already present
+	// Track model, update last model, and accumulate per-model usage stats
 	if rec.Model != "" {
+		s.LastModel = rec.Model
+
+		if s.ModelStats == nil {
+			s.ModelStats = make(map[string]*ModelUsage)
+		}
+		stat, exists := s.ModelStats[rec.Model]
+		if !exists {
+			stat = &ModelUsage{Model: rec.Model}
+			s.ModelStats[rec.Model] = stat
+		}
+		stat.RequestCount++
+		stat.InputTokens += rec.InputTokens
+		stat.OutputTokens += rec.OutputTokens
+		stat.TotalTokens += rec.TotalTokens
+		stat.LastUsed = rec.Timestamp
+
+		// Recalculate percentages across all models in this session
+		if s.RequestCount > 0 {
+			for _, st := range s.ModelStats {
+				st.PercentReq = (float64(st.RequestCount) / float64(s.RequestCount)) * 100.0
+				if s.TotalTokens > 0 {
+					st.PercentTok = (float64(st.TotalTokens) / float64(s.TotalTokens)) * 100.0
+				}
+			}
+		}
+
 		hasModel := false
 		for _, m := range s.Models {
 			if m == rec.Model {
@@ -341,10 +383,21 @@ func (m *Manager) ListSessions() []*Session {
 		copy(reqCopy, s.RecentRequests)
 		modelsCopy := make([]string, len(s.Models))
 		copy(modelsCopy, s.Models)
+		var statsCopy map[string]*ModelUsage
+		if s.ModelStats != nil {
+			statsCopy = make(map[string]*ModelUsage, len(s.ModelStats))
+			for k, v := range s.ModelStats {
+				if v != nil {
+					vCopy := *v
+					statsCopy[k] = &vCopy
+				}
+			}
+		}
 
 		sessCopy := *s
 		sessCopy.RecentRequests = reqCopy
 		sessCopy.Models = modelsCopy
+		sessCopy.ModelStats = statsCopy
 		list = append(list, &sessCopy)
 	}
 

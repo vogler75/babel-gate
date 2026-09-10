@@ -431,3 +431,83 @@ func TestSessionManagerRestartContinuity(t *testing.T) {
 		t.Errorf("expected 900 total tokens in summary, got %d", summary.TotalTokens)
 	}
 }
+
+func TestSessionModelSwitchingAndUsageStats(t *testing.T) {
+	mgr := NewManager()
+	s := mgr.GetOrCreate("sess-switch", "127.0.0.1", "claude-code/1.0", "Claude Code")
+
+	// 1. First call: Gemini
+	mgr.RecordRequest(s.ID, RequestRecord{
+		Provider:     "google",
+		Model:        "gemini-3.8-flash",
+		InputTokens:  100,
+		OutputTokens: 50,
+		Status:       "success",
+	})
+
+	sess := mgr.ListSessions()[0]
+	if sess.LastModel != "google/gemini-3.8-flash" {
+		t.Errorf("expected last model google/gemini-3.8-flash, got %s", sess.LastModel)
+	}
+	if len(sess.ModelStats) != 1 {
+		t.Fatalf("expected 1 model stat, got %d", len(sess.ModelStats))
+	}
+	geminiStat := sess.ModelStats["google/gemini-3.8-flash"]
+	if geminiStat.RequestCount != 1 || geminiStat.TotalTokens != 150 || geminiStat.PercentReq != 100.0 {
+		t.Errorf("unexpected gemini stats: %+v", geminiStat)
+	}
+
+	// 2. Second call: switches to Claude for one request
+	mgr.RecordRequest(s.ID, RequestRecord{
+		Provider:     "anthropic",
+		Model:        "claude-3-7-sonnet",
+		InputTokens:  200,
+		OutputTokens: 100,
+		Status:       "success",
+	})
+
+	sess = mgr.ListSessions()[0]
+	if sess.LastModel != "anthropic/claude-3-7-sonnet" {
+		t.Errorf("expected last model anthropic/claude-3-7-sonnet, got %s", sess.LastModel)
+	}
+	if len(sess.ModelStats) != 2 {
+		t.Fatalf("expected 2 model stats, got %d", len(sess.ModelStats))
+	}
+	geminiStat = sess.ModelStats["google/gemini-3.8-flash"]
+	claudeStat := sess.ModelStats["anthropic/claude-3-7-sonnet"]
+	if geminiStat.RequestCount != 1 || geminiStat.PercentReq != 50.0 {
+		t.Errorf("unexpected gemini stats after switch: %+v", geminiStat)
+	}
+	if claudeStat.RequestCount != 1 || claudeStat.PercentReq != 50.0 {
+		t.Errorf("unexpected claude stats after switch: %+v", claudeStat)
+	}
+
+	// 3. Third call: switches back to Gemini
+	mgr.RecordRequest(s.ID, RequestRecord{
+		Provider:     "google",
+		Model:        "gemini-3.8-flash",
+		InputTokens:  100,
+		OutputTokens: 50,
+		Status:       "success",
+	})
+
+	sess = mgr.ListSessions()[0]
+	// Verify LastModel switched back to Gemini
+	if sess.LastModel != "google/gemini-3.8-flash" {
+		t.Errorf("expected last model to switch back to google/gemini-3.8-flash, got %s", sess.LastModel)
+	}
+	geminiStat = sess.ModelStats["google/gemini-3.8-flash"]
+	claudeStat = sess.ModelStats["anthropic/claude-3-7-sonnet"]
+	if geminiStat.RequestCount != 2 {
+		t.Errorf("expected gemini request count 2, got %d", geminiStat.RequestCount)
+	}
+	if geminiStat.PercentReq < 66.6 || geminiStat.PercentReq > 66.7 {
+		t.Errorf("expected gemini percent req ~66.7%%, got %.2f%%", geminiStat.PercentReq)
+	}
+	if claudeStat.RequestCount != 1 {
+		t.Errorf("expected claude request count 1, got %d", claudeStat.RequestCount)
+	}
+	if claudeStat.PercentReq < 33.3 || claudeStat.PercentReq > 33.4 {
+		t.Errorf("expected claude percent req ~33.3%%, got %.2f%%", claudeStat.PercentReq)
+	}
+}

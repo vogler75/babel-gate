@@ -531,7 +531,13 @@ func TestSessionsAPIAndTokenTracking(t *testing.T) {
 			InputTokens  int      `json:"input_tokens"`
 			OutputTokens int      `json:"output_tokens"`
 			TotalTokens  int      `json:"total_tokens"`
+			LastModel    string   `json:"last_model"`
 			Models       []string `json:"models"`
+			ModelStats   map[string]struct {
+				Model        string  `json:"model"`
+				RequestCount int     `json:"request_count"`
+				PercentReq   float64 `json:"percent_req"`
+			} `json:"model_stats"`
 		} `json:"sessions"`
 	}
 
@@ -557,11 +563,23 @@ func TestSessionsAPIAndTokenTracking(t *testing.T) {
 
 	for _, s := range sessResp.Sessions {
 		if s.ID == "sess_claude_123" {
+			if s.LastModel != "google/gemini-2.5-pro" {
+				t.Errorf("expected last model 'google/gemini-2.5-pro', got %q", s.LastModel)
+			}
+			if len(s.ModelStats) == 0 || s.ModelStats["google/gemini-2.5-pro"].PercentReq != 100 {
+				t.Errorf("expected 100%% percent req for gemini, got %+v", s.ModelStats)
+			}
 			if len(s.Models) == 0 || s.Models[0] != "google/gemini-2.5-pro" {
 				t.Errorf("expected 'google/gemini-2.5-pro' in claude session models, got: %+v", s.Models)
 			}
 		}
 		if s.ID == "sess_play_456" {
+			if s.LastModel != "openai/gpt-4o" {
+				t.Errorf("expected last model 'openai/gpt-4o', got %q", s.LastModel)
+			}
+			if len(s.ModelStats) == 0 || s.ModelStats["openai/gpt-4o"].PercentReq != 100 {
+				t.Errorf("expected 100%% percent req for gpt-4o, got %+v", s.ModelStats)
+			}
 			if len(s.Models) == 0 || s.Models[0] != "openai/gpt-4o" {
 				t.Errorf("expected 'openai/gpt-4o' in playground session models, got: %+v", s.Models)
 			}

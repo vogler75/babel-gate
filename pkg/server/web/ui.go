@@ -329,6 +329,8 @@ const dashboardHTML = `<!DOCTYPE html>
     .pill-cohere { background: #14b8a622; color: #2dd4bf; border: 1px solid #14b8a6; }
     .pill-alias { background: #a371f722; color: #bc8cff; border: 1px solid #8957e5; }
     .pill-default { background: #388bfd1a; color: #79c0ff; border: 1px solid #388bfd66; }
+    .model-pct { font-size: 0.72rem; opacity: 0.9; margin-left: 0.3rem; font-weight: 700; background: rgba(0,0,0,0.25); padding: 0.05rem 0.25rem; border-radius: 3px; }
+    .last-tag { display: inline-block; background: #238636; color: #ffffff; border-radius: 3px; font-size: 0.65rem; padding: 0.05rem 0.3rem; margin-left: 0.35rem; line-height: 1.2; font-weight: 700; letter-spacing: 0.02em; vertical-align: middle; }
     
     table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
     th, td { text-align: left; padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
@@ -970,9 +972,48 @@ const dashboardHTML = `<!DOCTYPE html>
         tableBody.innerHTML = '';
         sessions.forEach(s => {
           const clientPill = getClientPillClass(s.client);
-          const modelsHtml = (s.models && s.models.length > 0)
-            ? s.models.map(m => '<span class="pill ' + getProviderPillClass(m) + '" style="margin-right: 0.25rem; margin-bottom: 0.25rem;">' + escapeHtml(m) + '</span>').join('')
-            : '<span style="color: #8b949e;">-</span>';
+          let modelsHtml = '<span style="color: #8b949e;">-</span>';
+          if (s.models && s.models.length > 0) {
+            modelsHtml = s.models.map(m => {
+              const stat = (s.model_stats && s.model_stats[m]) ? s.model_stats[m] : null;
+              const isLast = (s.last_model && s.last_model === m) ||
+                             (!s.last_model && s.recent_requests && s.recent_requests.length > 0 && s.recent_requests[0].model === m);
+
+              let pctReq = 0;
+              let pctTok = 0;
+              let reqs = 0;
+              let toks = 0;
+              if (stat) {
+                pctReq = (stat.percent_req !== undefined && stat.percent_req !== null) ? Math.round(stat.percent_req) : 0;
+                pctTok = (stat.percent_tok !== undefined && stat.percent_tok !== null) ? Math.round(stat.percent_tok) : 0;
+                reqs = stat.request_count || 0;
+                toks = stat.total_tokens || 0;
+              } else if (s.request_count > 0 && s.models.length === 1) {
+                pctReq = 100;
+                pctTok = 100;
+                reqs = s.request_count;
+                toks = s.total_tokens;
+              }
+
+              const pctLabel = pctReq > 0 ? (pctReq + '%') : '';
+              const tooltip = stat
+                ? (m + '\n' + reqs + ' reqs (' + pctReq + '%)\n' + formatNumber(toks) + ' tokens (' + pctTok + '%)' + (isLast ? '\n● Last called' : ''))
+                : (m + (isLast ? '\n● Last called' : ''));
+
+              const lastBadge = isLast
+                ? '<span class="last-tag" title="Used in most recent call">LAST</span>'
+                : '';
+              const extraStyle = isLast
+                ? 'box-shadow: 0 0 0 1px #58a6ff; font-weight: 700;'
+                : 'opacity: 0.9;';
+
+              return '<span class="pill ' + getProviderPillClass(m) + '" style="margin-right: 0.25rem; margin-bottom: 0.25rem; ' + extraStyle + '" title="' + escapeHtml(tooltip) + '">' +
+                escapeHtml(m) +
+                (pctLabel ? '<span class="model-pct">' + pctLabel + '</span>' : '') +
+                lastBadge +
+                '</span>';
+            }).join('');
+          }
 
           const reqCount = s.request_count || 0;
           const isExpanded = openDetails.has(s.id);
@@ -1024,8 +1065,29 @@ const dashboardHTML = `<!DOCTYPE html>
               '</tbody></table>';
           }
 
+          let modelSummaryHtml = '';
+          if (s.models && s.models.length > 0 && s.model_stats) {
+            const statsList = Object.values(s.model_stats);
+            if (statsList.length > 0) {
+              modelSummaryHtml = '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; font-size: 0.78rem;">' +
+                statsList.map(st => {
+                  const isLast = (s.last_model === st.model);
+                  const pReq = Math.round(st.percent_req || 0);
+                  const pTok = Math.round(st.percent_tok || 0);
+                  return '<div style="background: #161b22; border: 1px solid ' + (isLast ? '#388bfd' : 'var(--border)') + '; border-radius: 4px; padding: 0.25rem 0.5rem; display: flex; align-items: center;">' +
+                    '<span class="pill ' + getProviderPillClass(st.model) + '" style="padding: 0.1rem 0.35rem; font-size: 0.7rem; margin-right: 0.35rem;">' + escapeHtml(st.model) + '</span>' +
+                    '<span><strong>' + pReq + '%</strong> reqs (' + st.request_count + ') · ' +
+                    '<strong>' + pTok + '%</strong> tokens (' + formatNumber(st.total_tokens) + ')</span>' +
+                    (isLast ? '<span class="last-tag" style="margin-left: 0.35rem;">LAST</span>' : '') +
+                    '</div>';
+                }).join('') +
+                '</div>';
+            }
+          }
+
           detailsTr.innerHTML = '<td colspan="11" style="background: #11151c; padding: 0.75rem 1rem; border-top: 1px dashed var(--border);">' +
             '<div style="font-size: 0.82rem; font-weight: 600; color: #8b949e; margin-bottom: 0.35rem;">Request History for Session ' + escapeHtml(s.id) + '</div>' +
+            modelSummaryHtml +
             requestsHtml +
             '</td>';
           tableBody.appendChild(detailsTr);

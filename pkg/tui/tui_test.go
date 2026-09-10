@@ -137,6 +137,51 @@ func TestSessionsViewShowsTokenSpeed(t *testing.T) {
 	}
 }
 
+func TestTUISessionModelSwitching(t *testing.T) {
+	cfg := &config.Config{
+		Database: config.DatabaseConfig{Path: filepath.Join(t.TempDir(), "metrics.db")},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := server.NewServer(cfg, engine)
+	defer srv.Metrics().Close()
+
+	sess := srv.Sessions().GetOrCreate("switch-sess", "127.0.0.1", "test", "Claude Code")
+
+	// Turn 1: Gemini
+	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
+		Provider: "google", Model: "gemini-3.8-flash", Status: "success",
+	})
+	app := New(srv, engine, nil)
+	lines := app.getSessionsInfo(1)
+	if len(lines) == 0 || !strings.Contains(lines[0], "google/gemini-3.8-flash") {
+		t.Fatalf("expected google/gemini-3.8-flash in TUI, got: %v", lines)
+	}
+
+	// Turn 2: Claude for one request
+	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
+		Provider: "anthropic", Model: "claude-3-7-sonnet", Status: "success",
+	})
+	lines = app.getSessionsInfo(1)
+	if len(lines) == 0 || !strings.Contains(lines[0], "anthropic/claude-3-7-sonnet") {
+		t.Fatalf("expected anthropic/claude-3-7-sonnet in TUI, got: %v", lines)
+	}
+
+	// Turn 3: switches back to Gemini
+	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
+		Provider: "google", Model: "gemini-3.8-flash", Status: "success",
+	})
+	lines = app.getSessionsInfo(1)
+	if len(lines) == 0 || !strings.Contains(lines[0], "google/gemini-3.8-flash") {
+		t.Fatalf("expected google/gemini-3.8-flash in TUI after switching back, got: %v", lines)
+	}
+	if strings.Contains(lines[0], "anthropic/claude-3-7-sonnet") {
+		t.Fatalf("TUI should not display claude-3-7-sonnet as active model after switching back to gemini: %s", lines[0])
+	}
+}
+
 func TestVisualWidth(t *testing.T) {
 	ascii := "hello"
 	if visualWidth(ascii) != 5 {

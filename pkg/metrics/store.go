@@ -134,6 +134,7 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		user_agent TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		last_active TEXT NOT NULL,
+		last_model TEXT NOT NULL DEFAULT '',
 		request_count INTEGER NOT NULL DEFAULT 0,
 		context_tokens INTEGER NOT NULL DEFAULT 0,
 		context_tokens_estimated INTEGER NOT NULL DEFAULT 0,
@@ -143,7 +144,8 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		tokens_per_second REAL NOT NULL DEFAULT 0.0,
 		generation_duration_ms INTEGER NOT NULL DEFAULT 0,
 		measured_output_tokens INTEGER NOT NULL DEFAULT 0,
-		models TEXT NOT NULL DEFAULT '[]'
+		models TEXT NOT NULL DEFAULT '[]',
+		model_stats TEXT NOT NULL DEFAULT '{}'
 	);
 	CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
 
@@ -170,6 +172,14 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initializing db schema: %w", err)
+	}
+
+	// Safe column migrations for existing databases
+	for _, alter := range []string{
+		"ALTER TABLE sessions ADD COLUMN last_model TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE sessions ADD COLUMN model_stats TEXT NOT NULL DEFAULT '{}';",
+	} {
+		_, _ = db.Exec(alter)
 	}
 
 	s := &Store{

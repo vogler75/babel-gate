@@ -19,6 +19,11 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		modelsJSON = []byte("[]")
 	}
 
+	modelStatsJSON, err := json.Marshal(sess.ModelStats)
+	if err != nil || len(sess.ModelStats) == 0 {
+		modelStatsJSON = []byte("{}")
+	}
+
 	createdAtStr := sess.CreatedAt.UTC().Format(time.RFC3339)
 	lastActiveStr := sess.LastActive.UTC().Format(time.RFC3339)
 
@@ -30,16 +35,17 @@ func (s *Store) SaveSession(sess *session.Session) error {
 	query := `
 	INSERT INTO sessions (
 		id, client, client_ip, user_agent, created_at, last_active,
-		request_count, context_tokens, context_tokens_estimated,
+		last_model, request_count, context_tokens, context_tokens_estimated,
 		input_tokens, output_tokens, total_tokens, tokens_per_second,
-		generation_duration_ms, measured_output_tokens, models
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		generation_duration_ms, measured_output_tokens, models, model_stats
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		client = excluded.client,
 		client_ip = excluded.client_ip,
 		user_agent = excluded.user_agent,
 		created_at = excluded.created_at,
 		last_active = excluded.last_active,
+		last_model = excluded.last_model,
 		request_count = excluded.request_count,
 		context_tokens = excluded.context_tokens,
 		context_tokens_estimated = excluded.context_tokens_estimated,
@@ -49,7 +55,8 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		tokens_per_second = excluded.tokens_per_second,
 		generation_duration_ms = excluded.generation_duration_ms,
 		measured_output_tokens = excluded.measured_output_tokens,
-		models = excluded.models;
+		models = excluded.models,
+		model_stats = excluded.model_stats;
 	`
 
 	s.mu.Lock()
@@ -57,11 +64,11 @@ func (s *Store) SaveSession(sess *session.Session) error {
 
 	_, err = s.db.Exec(query,
 		sess.ID, sess.Client, sess.ClientIP, sess.UserAgent,
-		createdAtStr, lastActiveStr,
+		createdAtStr, lastActiveStr, sess.LastModel,
 		sess.RequestCount, sess.ContextTokens, ctxEst,
 		sess.InputTokens, sess.OutputTokens, sess.TotalTokens,
 		sess.TokensPerSecond, sess.GenerationDurationMs, sess.MeasuredOutputTokens,
-		string(modelsJSON),
+		string(modelsJSON), string(modelStatsJSON),
 	)
 	return err
 }
@@ -144,9 +151,9 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 
 	rows, err := s.db.Query(`
 		SELECT id, client, client_ip, user_agent, created_at, last_active,
-		       request_count, context_tokens, context_tokens_estimated,
+		       last_model, request_count, context_tokens, context_tokens_estimated,
 		       input_tokens, output_tokens, total_tokens, tokens_per_second,
-		       generation_duration_ms, measured_output_tokens, models
+		       generation_duration_ms, measured_output_tokens, models, model_stats
 		FROM sessions
 		WHERE last_active >= ?
 		ORDER BY last_active ASC
@@ -162,19 +169,21 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 		var (
 			id, client, clientIP, userAgent string
 			createdAtStr, lastActiveStr      string
+			lastModel                        string
 			reqCount, ctxTok, ctxTokEst      int
 			inTok, outTok, totTok            int
 			tps                              float64
 			genDurMs                         int64
 			measOutTok                       int
-			modelsJSON                       string
+			modelsJSON, modelStatsJSON       string
 		)
 		if err := rows.Scan(
 			&id, &client, &clientIP, &userAgent,
 			&createdAtStr, &lastActiveStr,
+			&lastModel,
 			&reqCount, &ctxTok, &ctxTokEst,
 			&inTok, &outTok, &totTok,
-			&tps, &genDurMs, &measOutTok, &modelsJSON,
+			&tps, &genDurMs, &measOutTok, &modelsJSON, &modelStatsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scanning session row: %w", err)
 		}
@@ -196,6 +205,14 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			models = make([]string, 0)
 		}
 
+		var modelStats map[string]*session.ModelUsage
+		if modelStatsJSON != "" && modelStatsJSON != "{}" {
+			_ = json.Unmarshal([]byte(modelStatsJSON), &modelStats)
+		}
+		if modelStats == nil {
+			modelStats = make(map[string]*session.ModelUsage)
+		}
+
 		sess := &session.Session{
 			ID:                     id,
 			Client:                 client,
@@ -203,6 +220,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			UserAgent:              userAgent,
 			CreatedAt:              createdAt,
 			LastActive:             lastActive,
+			LastModel:              lastModel,
 			RequestCount:           reqCount,
 			ContextTokens:          ctxTok,
 			ContextTokensEstimated: ctxTokEst != 0,
@@ -213,6 +231,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			GenerationDurationMs:   genDurMs,
 			MeasuredOutputTokens:   measOutTok,
 			Models:                 models,
+			ModelStats:             modelStats,
 			RecentRequests:         make([]session.RequestRecord, 0),
 		}
 		sessions = append(sessions, sess)
@@ -282,6 +301,38 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			})
 		}
 		reqRows.Close()
+
+		if sess.LastModel == "" && len(sess.RecentRequests) > 0 {
+			sess.LastModel = sess.RecentRequests[0].Model
+		}
+		if len(sess.ModelStats) == 0 && len(sess.RecentRequests) > 0 {
+			sess.ModelStats = make(map[string]*session.ModelUsage)
+			for _, r := range sess.RecentRequests {
+				if r.Model == "" {
+					continue
+				}
+				st, exists := sess.ModelStats[r.Model]
+				if !exists {
+					st = &session.ModelUsage{Model: r.Model}
+					sess.ModelStats[r.Model] = st
+				}
+				st.RequestCount++
+				st.InputTokens += r.InputTokens
+				st.OutputTokens += r.OutputTokens
+				st.TotalTokens += r.TotalTokens
+				if st.LastUsed.Before(r.Timestamp) {
+					st.LastUsed = r.Timestamp
+				}
+			}
+			if sess.RequestCount > 0 {
+				for _, st := range sess.ModelStats {
+					st.PercentReq = (float64(st.RequestCount) / float64(sess.RequestCount)) * 100.0
+					if sess.TotalTokens > 0 {
+						st.PercentTok = (float64(st.TotalTokens) / float64(sess.TotalTokens)) * 100.0
+					}
+				}
+			}
+		}
 	}
 
 	return sessions, nil
