@@ -301,7 +301,7 @@ const dashboardHTML = `<!DOCTYPE html>
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
     body { background-color: var(--bg); color: var(--text); padding: 2rem; line-height: 1.5; }
-    .container { max-width: 1140px; margin: 0 auto; }
+    .container { max-width: 100%; margin: 0 auto; }
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
     h1 { color: var(--text-bright); font-size: 1.8rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
     .status-badge { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 12px; font-weight: 500; }
@@ -369,6 +369,9 @@ const dashboardHTML = `<!DOCTYPE html>
     .model-actions button:disabled { opacity: .5; cursor: not-allowed; }
     #openCodeConfigPanel, #claudeCodeConfigPanel { margin-top: 1rem; }
     #openCodeConfigOutput, #claudeCodeConfigOutput { max-height: 360px; white-space: pre; }
+    .scroll-frame { overflow: auto; max-height: 460px; border: 1px solid var(--border); border-radius: 8px; }
+    .scroll-frame table { margin-top: 0; }
+    .scroll-frame th { position: sticky; top: 0; z-index: 1; background: var(--card-bg); }
     
     .token-in { color: var(--stat-in); font-weight: 600; font-family: ui-monospace, monospace; }
     .token-out { color: var(--stat-out); font-weight: 600; font-family: ui-monospace, monospace; }
@@ -617,7 +620,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <button id="generateOpenCodeButton" class="btn-sm" onclick="generateOpenCodeConfig()" disabled>Generate OpenCode Config</button>
         <button id="generateClaudeCodeButton" class="btn-sm" onclick="generateClaudeCodeConfig()" disabled>Generate Claude Code Config</button>
       </div>
-      <div style="overflow-x: auto;">
+      <div class="scroll-frame">
         <table>
           <thead>
             <tr><th><input id="selectAllModels" class="model-select" type="checkbox" aria-label="Select all visible models" title="Select all visible models" onchange="toggleAllOpenCodeModels(this.checked)"></th><th>Model Identifier</th><th>Provider / Route</th><th>Type</th><th>Description</th></tr>
@@ -1824,6 +1827,8 @@ const dashboardHTML = `<!DOCTYPE html>
     }
 
     function renderAnalytics(buckets, summary, isHourly, activeDate) {
+      // Remember the last render so a window resize can redraw at the new width.
+      window.__lastAnalytics = { buckets: buckets, summary: summary, isHourly: isHourly, activeDate: activeDate };
       // Update KPI cards
       const s = summary || {};
       document.getElementById('kpiTotalTokens').textContent = formatNumber(s.total_tokens || 0);
@@ -1851,9 +1856,10 @@ const dashboardHTML = `<!DOCTYPE html>
       }
       emptyEl.style.display = 'none';
 
-      // Dimensions
-      const vbWidth = 1000;
-      const vbHeight = 300;
+      // Dimensions: match the viewBox 1:1 to the wrapper's pixel size so nothing
+      // gets stretched when the page is wide (preserveAspectRatio="none").
+      const vbWidth = Math.max(360, Math.round(svgWrapper.clientWidth) || 1000);
+      const vbHeight = Math.max(200, Math.round(svgWrapper.clientHeight) || 300);
       const marginLeft = 65;
       const marginRight = 20;
       const marginTop = 20;
@@ -1956,6 +1962,15 @@ const dashboardHTML = `<!DOCTYPE html>
       }
       legendEl.innerHTML = legendHtml;
     }
+
+    let chartResizeTimer = null;
+    window.addEventListener('resize', function() {
+      clearTimeout(chartResizeTimer);
+      chartResizeTimer = setTimeout(function() {
+        const last = window.__lastAnalytics;
+        if (last) renderAnalytics(last.buckets, last.summary, last.isHourly, last.activeDate);
+      }, 150);
+    });
 
     function showChartTooltip(event, idx, isHourly) {
       const tooltip = document.getElementById('chartTooltip');
