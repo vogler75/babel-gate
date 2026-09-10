@@ -18,6 +18,16 @@ type MetricsRecorder interface {
 	Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error
 }
 
+// SessionStore defines an interface for persisting and restoring sessions across restarts.
+type SessionStore interface {
+	SaveSession(s *Session) error
+	SaveRequest(sessionID string, rec RequestRecord) error
+	LoadActiveSessions(since time.Time, maxSessions int, maxRequestsPerSession int) ([]*Session, error)
+	DeleteSession(sessionID string) error
+	ClearSessions() error
+	PurgeOldSessions(cutoff time.Time) (int64, error)
+}
+
 // RequestRecord captures details of an individual LLM request within a session.
 type RequestRecord struct {
 	ID                   string    `json:"id"`
@@ -51,8 +61,8 @@ type Session struct {
 	OutputTokens           int       `json:"output_tokens"`
 	TotalTokens            int       `json:"total_tokens"`
 	TokensPerSecond        float64   `json:"tokens_per_second"`
-	generationDurationMs   int64
-	measuredOutputTokens   int
+	GenerationDurationMs   int64     `json:"-"`
+	MeasuredOutputTokens   int       `json:"-"`
 	Models                 []string        `json:"models"`
 	RecentRequests         []RequestRecord `json:"recent_requests,omitempty"`
 }
@@ -79,6 +89,7 @@ type Manager struct {
 	totalInTok      int
 	totalOutTok     int
 	metricsRecorder MetricsRecorder
+	sessionStore    SessionStore
 }
 
 // NewManager creates a new Session Manager with retention defaults.
@@ -98,6 +109,32 @@ func (m *Manager) SetMetricsRecorder(rec MetricsRecorder) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.metricsRecorder = rec
+}
+
+// SetSessionStore assigns a persistent session store to the manager and restores active sessions.
+func (m *Manager) SetSessionStore(store SessionStore) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sessionStore = store
+	if store == nil {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-m.sessionTTL)
+	loaded, err := store.LoadActiveSessions(cutoff, m.maxSessions, m.maxRequests)
+	if err != nil {
+		return err
+	}
+
+	for _, s := range loaded {
+		m.sessions[s.ID] = s
+		m.order = append(m.order, s.ID)
+		m.totalReqs += s.RequestCount
+		m.totalInTok += s.InputTokens
+		m.totalOutTok += s.OutputTokens
+	}
+	return nil
 }
 
 // GenerateID produces a random hexadecimal session/request ID.
@@ -165,6 +202,9 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 		m.sessions[sessionID] = newSess
 		m.order = append(m.order, sessionID)
 		m.cleanupOldSessionsLocked(now)
+		if m.sessionStore != nil {
+			_ = m.sessionStore.SaveSession(newSess)
+		}
 		return newSess
 	}
 
@@ -195,6 +235,9 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 	m.sessions[newID] = newSess
 	m.order = append(m.order, newID)
 	m.cleanupOldSessionsLocked(now)
+	if m.sessionStore != nil {
+		_ = m.sessionStore.SaveSession(newSess)
+	}
 	return newSess
 }
 
@@ -250,9 +293,9 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	s.OutputTokens += rec.OutputTokens
 	s.TotalTokens += rec.TotalTokens
 	if rec.OutputTokens > 0 && generationDurationMs > 0 {
-		s.generationDurationMs += generationDurationMs
-		s.measuredOutputTokens += rec.OutputTokens
-		s.TokensPerSecond = float64(s.measuredOutputTokens) * 1000 / float64(s.generationDurationMs)
+		s.GenerationDurationMs += generationDurationMs
+		s.MeasuredOutputTokens += rec.OutputTokens
+		s.TokensPerSecond = float64(s.MeasuredOutputTokens) * 1000 / float64(s.GenerationDurationMs)
 	}
 
 	// Track model if not already present
@@ -279,6 +322,11 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	m.totalReqs++
 	m.totalInTok += rec.InputTokens
 	m.totalOutTok += rec.OutputTokens
+
+	if m.sessionStore != nil {
+		_ = m.sessionStore.SaveRequest(sessionID, rec)
+		_ = m.sessionStore.SaveSession(s)
+	}
 }
 
 // ListSessions returns all sessions ordered by LastActive descending.
@@ -337,6 +385,9 @@ func (m *Manager) DeleteSession(sessionID string) bool {
 			break
 		}
 	}
+	if m.sessionStore != nil {
+		_ = m.sessionStore.DeleteSession(sessionID)
+	}
 	return true
 }
 
@@ -350,6 +401,9 @@ func (m *Manager) Clear() {
 	m.totalReqs = 0
 	m.totalInTok = 0
 	m.totalOutTok = 0
+	if m.sessionStore != nil {
+		_ = m.sessionStore.ClearSessions()
+	}
 }
 
 func (m *Manager) cleanupOldSessionsLocked(now time.Time) {
@@ -369,6 +423,9 @@ func (m *Manager) cleanupOldSessionsLocked(now time.Time) {
 			}
 		}
 		m.order = filteredOrder
+		if m.sessionStore != nil {
+			_, _ = m.sessionStore.PurgeOldSessions(cutoff)
+		}
 	}
 
 	// 2. Evict oldest sessions if exceeding maxSessions
@@ -388,6 +445,9 @@ func (m *Manager) cleanupOldSessionsLocked(now time.Time) {
 		excess := len(m.sessions) - m.maxSessions
 		for i := 0; i < excess && i < len(stList); i++ {
 			delete(m.sessions, stList[i].id)
+			if m.sessionStore != nil {
+				_ = m.sessionStore.DeleteSession(stList[i].id)
+			}
 		}
 
 		newOrder := make([]string, 0, len(m.sessions))

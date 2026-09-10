@@ -102,6 +102,7 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		"PRAGMA journal_mode = WAL;",
 		"PRAGMA busy_timeout = 5000;",
 		"PRAGMA synchronous = NORMAL;",
+		"PRAGMA foreign_keys = ON;",
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
@@ -125,6 +126,46 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_hourly_metrics_time ON hourly_metrics(hour_timestamp);
 	CREATE INDEX IF NOT EXISTS idx_hourly_metrics_provider ON hourly_metrics(provider);
 	CREATE INDEX IF NOT EXISTS idx_hourly_metrics_model ON hourly_metrics(model);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		id TEXT PRIMARY KEY,
+		client TEXT NOT NULL,
+		client_ip TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		last_active TEXT NOT NULL,
+		request_count INTEGER NOT NULL DEFAULT 0,
+		context_tokens INTEGER NOT NULL DEFAULT 0,
+		context_tokens_estimated INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		tokens_per_second REAL NOT NULL DEFAULT 0.0,
+		generation_duration_ms INTEGER NOT NULL DEFAULT 0,
+		measured_output_tokens INTEGER NOT NULL DEFAULT 0,
+		models TEXT NOT NULL DEFAULT '[]'
+	);
+	CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
+
+	CREATE TABLE IF NOT EXISTS session_requests (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		timestamp TEXT NOT NULL,
+		provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL,
+		stream INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		generation_duration_ms INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		input_tokens_estimated INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		tokens_per_second REAL NOT NULL DEFAULT 0.0,
+		status TEXT NOT NULL DEFAULT 'success',
+		error_message TEXT NOT NULL DEFAULT '',
+		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_session_requests_session ON session_requests(session_id, timestamp DESC);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
@@ -208,6 +249,9 @@ func (s *Store) PurgeOldMetrics(retentionDays int) (int64, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	_, _ = s.db.Exec("DELETE FROM session_requests WHERE session_id IN (SELECT id FROM sessions WHERE last_active < ?)", cutoff)
+	_, _ = s.db.Exec("DELETE FROM sessions WHERE last_active < ?", cutoff)
 
 	res, err := s.db.Exec("DELETE FROM hourly_metrics WHERE hour_timestamp < ?", cutoff)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,11 @@ func (m *mockUpstreamOpenAI) ListModels(ctx context.Context) ([]providers.ModelI
 }
 
 func setupTestHandler() http.Handler {
+	tmpFile, _ := os.CreateTemp("", "babelgate_test_metrics_*.db")
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	_ = os.Remove(tmpPath)
+
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			Port:           8080,
@@ -110,7 +116,7 @@ func setupTestHandler() http.Handler {
 			CORSOrigins:    []string{"*"},
 		},
 		Database: config.DatabaseConfig{
-			Path:          os.TempDir() + "/babelgate_test_metrics.db",
+			Path:          tmpPath,
 			RetentionDays: 90,
 		},
 		Routing: config.RoutingConfig{
@@ -815,5 +821,181 @@ func TestLoggingMiddlewareWithTrace(t *testing.T) {
 	}
 	if !strings.Contains(logged, "stream:") {
 		t.Errorf("expected log to contain stream duration, got: %s", logged)
+	}
+}
+
+func TestServerRestartSessionContinuity(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "restart_test_metrics.db")
+
+	buildCfg := func() *config.Config {
+		return &config.Config{
+			Server: config.ServerConfig{
+				Port:           8080,
+				TimeoutSeconds: 30,
+				CORSOrigins:    []string{"*"},
+			},
+			Database: config.DatabaseConfig{
+				Path:          dbPath,
+				RetentionDays: 90,
+			},
+			Routing: config.RoutingConfig{
+				Routes: map[string]string{
+					"claude-3-7-sonnet": "google/gemini-2.5-pro",
+				},
+			},
+		}
+	}
+
+	// --- Instance 1: Before restart ---
+	cfg1 := buildCfg()
+	engine1, _ := router.NewEngine(cfg1)
+	engine1.RegisterProvider(&mockUpstreamGoogle{})
+	srv1 := NewServer(cfg1, engine1)
+
+	// Send request 1 with specific session ID
+	msgPayload := map[string]any{
+		"model": "claude-3-7-sonnet",
+		"messages": []map[string]any{
+			{"role": "user", "content": "Turn 1"},
+		},
+	}
+	body1, _ := json.Marshal(msgPayload)
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("X-Session-ID", "claude-code-sess-persisted")
+	req1.Header.Set("User-Agent", "claude-code/1.0")
+	rec1 := httptest.NewRecorder()
+
+	srv1.httpServer.Handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("instance 1 request failed: %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Verify session on instance 1
+	sessReq1 := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	sessRec1 := httptest.NewRecorder()
+	srv1.httpServer.Handler.ServeHTTP(sessRec1, sessReq1)
+
+	var sessResp1 struct {
+		Summary struct {
+			TotalSessions int `json:"total_sessions"`
+			TotalRequests int `json:"total_requests"`
+			TotalTokens   int `json:"total_tokens"`
+		} `json:"summary"`
+		Sessions []struct {
+			ID           string `json:"id"`
+			RequestCount int    `json:"request_count"`
+			TotalTokens  int    `json:"total_tokens"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(sessRec1.Body).Decode(&sessResp1); err != nil {
+		t.Fatalf("failed to decode sessions response: %v", err)
+	}
+	if sessResp1.Summary.TotalSessions != 1 || sessResp1.Summary.TotalRequests != 1 {
+		t.Fatalf("expected 1 session and 1 request on instance 1, got %d sessions, %d requests",
+			sessResp1.Summary.TotalSessions, sessResp1.Summary.TotalRequests)
+	}
+
+	// Shut down instance 1 cleanly
+	_ = srv1.Shutdown(context.Background())
+
+	// --- Instance 2: Fresh instance pointing to the same SQLite database ---
+	cfg2 := buildCfg()
+	engine2, _ := router.NewEngine(cfg2)
+	engine2.RegisterProvider(&mockUpstreamGoogle{})
+	srv2 := NewServer(cfg2, engine2)
+	defer srv2.Shutdown(context.Background())
+
+	// Query /api/sessions immediately on instance 2 (before any new request)
+	sessReq2 := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	sessRec2 := httptest.NewRecorder()
+	srv2.httpServer.Handler.ServeHTTP(sessRec2, sessReq2)
+
+	var sessResp2 struct {
+		Summary struct {
+			TotalSessions int `json:"total_sessions"`
+			TotalRequests int `json:"total_requests"`
+			TotalTokens   int `json:"total_tokens"`
+		} `json:"summary"`
+		Sessions []struct {
+			ID             string `json:"id"`
+			Client         string `json:"client"`
+			RequestCount   int    `json:"request_count"`
+			TotalTokens    int    `json:"total_tokens"`
+			RecentRequests []any  `json:"recent_requests"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(sessRec2.Body).Decode(&sessResp2); err != nil {
+		t.Fatalf("failed to decode instance 2 sessions response: %v", err)
+	}
+
+	if sessResp2.Summary.TotalSessions != 1 {
+		t.Fatalf("expected 1 session restored on instance 2, got %d", sessResp2.Summary.TotalSessions)
+	}
+	if sessResp2.Summary.TotalRequests != 1 {
+		t.Fatalf("expected 1 request restored on instance 2, got %d", sessResp2.Summary.TotalRequests)
+	}
+	if len(sessResp2.Sessions) != 1 || sessResp2.Sessions[0].ID != "claude-code-sess-persisted" {
+		t.Fatalf("expected restored session 'claude-code-sess-persisted', got %+v", sessResp2.Sessions)
+	}
+	if len(sessResp2.Sessions[0].RecentRequests) != 1 {
+		t.Fatalf("expected 1 recent request restored, got %d", len(sessResp2.Sessions[0].RecentRequests))
+	}
+
+	// --- Client sends Turn 2 after restart with the SAME session ID ---
+	msgPayload2 := map[string]any{
+		"model": "claude-3-7-sonnet",
+		"messages": []map[string]any{
+			{"role": "user", "content": "Turn 1"},
+			{"role": "assistant", "content": "Response from turn 1"},
+			{"role": "user", "content": "Turn 2"},
+		},
+	}
+	body2, _ := json.Marshal(msgPayload2)
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-Session-ID", "claude-code-sess-persisted")
+	req2.Header.Set("User-Agent", "claude-code/1.0")
+	rec2 := httptest.NewRecorder()
+
+	srv2.httpServer.Handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("instance 2 turn 2 request failed: %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Query /api/sessions on instance 2 after turn 2
+	sessReq3 := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	sessRec3 := httptest.NewRecorder()
+	srv2.httpServer.Handler.ServeHTTP(sessRec3, sessReq3)
+
+	var sessResp3 struct {
+		Summary struct {
+			TotalSessions int `json:"total_sessions"`
+			TotalRequests int `json:"total_requests"`
+			TotalTokens   int `json:"total_tokens"`
+		} `json:"summary"`
+		Sessions []struct {
+			ID             string `json:"id"`
+			RequestCount   int    `json:"request_count"`
+			TotalTokens    int    `json:"total_tokens"`
+			RecentRequests []any  `json:"recent_requests"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(sessRec3.Body).Decode(&sessResp3); err != nil {
+		t.Fatalf("failed to decode sessions response: %v", err)
+	}
+
+	if sessResp3.Summary.TotalSessions != 1 {
+		t.Errorf("expected still 1 session, got %d", sessResp3.Summary.TotalSessions)
+	}
+	if sessResp3.Summary.TotalRequests != 2 {
+		t.Errorf("expected 2 total requests after turn 2, got %d", sessResp3.Summary.TotalRequests)
+	}
+	if sessResp3.Sessions[0].RequestCount != 2 {
+		t.Errorf("expected session request count 2, got %d", sessResp3.Sessions[0].RequestCount)
+	}
+	if len(sessResp3.Sessions[0].RecentRequests) != 2 {
+		t.Errorf("expected 2 recent requests, got %d", len(sessResp3.Sessions[0].RecentRequests))
 	}
 }

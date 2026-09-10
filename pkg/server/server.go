@@ -37,6 +37,9 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 		log.Printf("Warning: failed to initialize SQLite metrics store at %s: %v", cfg.Database.Path, err)
 	} else {
 		sessions.SetMetricsRecorder(metricsStore)
+		if err := sessions.SetSessionStore(metricsStore); err != nil {
+			log.Printf("Warning: failed to restore sessions from SQLite: %v", err)
+		}
 	}
 
 	anthropicHandler := inbound.NewAnthropicHandler(engine, catalog, sessions)

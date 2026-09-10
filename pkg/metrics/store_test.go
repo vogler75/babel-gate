@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vogler75/babel-gate/pkg/session"
 )
 
 func TestStore_BasicOperations(t *testing.T) {
@@ -172,5 +174,126 @@ func TestStore_PurgeOldMetrics(t *testing.T) {
 	}
 	if summary.Requests != 1 {
 		t.Errorf("expected 1 remaining request, got %d", summary.Requests)
+	}
+}
+
+func TestStore_SessionPersistence(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "metrics_sess_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "metrics.db")
+	store, err := NewStore(dbPath, 90)
+	if err != nil {
+		t.Fatalf("failed to init store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	sess := &session.Session{
+		ID:                     "sess_test_123",
+		Client:                 "Claude Code",
+		ClientIP:               "127.0.0.1",
+		UserAgent:              "claude-code/1.0",
+		CreatedAt:              now.Add(-10 * time.Minute),
+		LastActive:             now,
+		RequestCount:           2,
+		ContextTokens:          150,
+		ContextTokensEstimated: false,
+		InputTokens:            300,
+		OutputTokens:           100,
+		TotalTokens:            400,
+		TokensPerSecond:        25.5,
+		GenerationDurationMs:   4000,
+		MeasuredOutputTokens:   100,
+		Models:                 []string{"google/gemini-2.5-pro", "openai/gpt-4o"},
+	}
+
+	if err := store.SaveSession(sess); err != nil {
+		t.Fatalf("SaveSession failed: %v", err)
+	}
+
+	req1 := session.RequestRecord{
+		ID:                   "req_1",
+		Timestamp:            now.Add(-5 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-2.5-pro",
+		Stream:               true,
+		DurationMs:           2500,
+		GenerationDurationMs: 2000,
+		InputTokens:          150,
+		OutputTokens:         50,
+		TotalTokens:          200,
+		TokensPerSecond:      25.0,
+		Status:               "success",
+	}
+	req2 := session.RequestRecord{
+		ID:                   "req_2",
+		Timestamp:            now,
+		Provider:             "openai",
+		Model:                "openai/gpt-4o",
+		Stream:               false,
+		DurationMs:           2000,
+		GenerationDurationMs: 2000,
+		InputTokens:          150,
+		OutputTokens:         50,
+		TotalTokens:          200,
+		TokensPerSecond:      25.0,
+		Status:               "success",
+	}
+
+	if err := store.SaveRequest(sess.ID, req1); err != nil {
+		t.Fatalf("SaveRequest req1 failed: %v", err)
+	}
+	if err := store.SaveRequest(sess.ID, req2); err != nil {
+		t.Fatalf("SaveRequest req2 failed: %v", err)
+	}
+
+	// Load active sessions
+	loaded, err := store.LoadActiveSessions(now.Add(-1*time.Hour), 10, 10)
+	if err != nil {
+		t.Fatalf("LoadActiveSessions failed: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 session loaded, got %d", len(loaded))
+	}
+
+	loadedSess := loaded[0]
+	if loadedSess.ID != sess.ID {
+		t.Errorf("expected session ID %s, got %s", sess.ID, loadedSess.ID)
+	}
+	if loadedSess.Client != sess.Client {
+		t.Errorf("expected client %s, got %s", sess.Client, loadedSess.Client)
+	}
+	if loadedSess.TotalTokens != 400 {
+		t.Errorf("expected 400 total tokens, got %d", loadedSess.TotalTokens)
+	}
+	if len(loadedSess.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(loadedSess.Models))
+	}
+	if len(loadedSess.RecentRequests) != 2 {
+		t.Fatalf("expected 2 recent requests, got %d", len(loadedSess.RecentRequests))
+	}
+	// Recent requests must be ordered newest first (req2 then req1)
+	if loadedSess.RecentRequests[0].ID != "req_2" {
+		t.Errorf("expected most recent request to be req_2, got %s", loadedSess.RecentRequests[0].ID)
+	}
+	if loadedSess.RecentRequests[1].ID != "req_1" {
+		t.Errorf("expected second request to be req_1, got %s", loadedSess.RecentRequests[1].ID)
+	}
+
+	// Delete session
+	if err := store.DeleteSession(sess.ID); err != nil {
+		t.Fatalf("DeleteSession failed: %v", err)
+	}
+
+	loadedAfterDelete, err := store.LoadActiveSessions(now.Add(-1*time.Hour), 10, 10)
+	if err != nil {
+		t.Fatalf("LoadActiveSessions after delete failed: %v", err)
+	}
+	if len(loadedAfterDelete) != 0 {
+		t.Errorf("expected 0 sessions after delete, got %d", len(loadedAfterDelete))
 	}
 }

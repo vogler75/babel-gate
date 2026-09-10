@@ -262,3 +262,172 @@ func TestSessionManagerMetricsRecorder(t *testing.T) {
 		t.Errorf("expected session model 'anthropic/claude-3-7-sonnet', got: %+v", s.Models)
 	}
 }
+
+type mockSessionStore struct {
+	sessions map[string]*Session
+	requests map[string][]RequestRecord
+}
+
+func newMockSessionStore() *mockSessionStore {
+	return &mockSessionStore{
+		sessions: make(map[string]*Session),
+		requests: make(map[string][]RequestRecord),
+	}
+}
+
+func (m *mockSessionStore) SaveSession(s *Session) error {
+	copied := *s
+	m.sessions[s.ID] = &copied
+	return nil
+}
+
+func (m *mockSessionStore) SaveRequest(sessionID string, rec RequestRecord) error {
+	m.requests[sessionID] = append([]RequestRecord{rec}, m.requests[sessionID]...)
+	return nil
+}
+
+func (m *mockSessionStore) LoadActiveSessions(since time.Time, maxSessions int, maxRequestsPerSession int) ([]*Session, error) {
+	var list []*Session
+	for _, s := range m.sessions {
+		if !s.LastActive.Before(since) {
+			sessCopy := *s
+			reqs := m.requests[s.ID]
+			if len(reqs) > maxRequestsPerSession {
+				reqs = reqs[:maxRequestsPerSession]
+			}
+			sessCopy.RecentRequests = reqs
+			list = append(list, &sessCopy)
+		}
+	}
+	return list, nil
+}
+
+func (m *mockSessionStore) DeleteSession(sessionID string) error {
+	delete(m.sessions, sessionID)
+	delete(m.requests, sessionID)
+	return nil
+}
+
+func (m *mockSessionStore) ClearSessions() error {
+	m.sessions = make(map[string]*Session)
+	m.requests = make(map[string][]RequestRecord)
+	return nil
+}
+
+func (m *mockSessionStore) PurgeOldSessions(cutoff time.Time) (int64, error) {
+	var count int64
+	for id, s := range m.sessions {
+		if s.LastActive.Before(cutoff) {
+			delete(m.sessions, id)
+			delete(m.requests, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
+func TestSessionManagerRestartContinuity(t *testing.T) {
+	store := newMockSessionStore()
+
+	// --- Phase 1: Pre-restart (Manager 1) ---
+	mgr1 := NewManager()
+	if err := mgr1.SetSessionStore(store); err != nil {
+		t.Fatalf("failed to set store: %v", err)
+	}
+
+	s1 := mgr1.GetOrCreate("sess-restart", "127.0.0.1", "claude-code/1.0", "Claude Code")
+	mgr1.RecordRequest(s1.ID, RequestRecord{
+		ID:                   "req-1",
+		Provider:             "anthropic",
+		Model:                "claude-3-7-sonnet",
+		InputTokens:          100,
+		OutputTokens:         50,
+		TotalTokens:          150,
+		GenerationDurationMs: 1000,
+		Status:               "success",
+	})
+	mgr1.RecordRequest(s1.ID, RequestRecord{
+		ID:                   "req-2",
+		Provider:             "anthropic",
+		Model:                "claude-3-7-sonnet",
+		InputTokens:          200,
+		OutputTokens:         100,
+		TotalTokens:          300,
+		GenerationDurationMs: 2000,
+		Status:               "success",
+	})
+
+	if s1.RequestCount != 2 {
+		t.Fatalf("expected 2 requests in manager 1, got %d", s1.RequestCount)
+	}
+	if s1.TotalTokens != 450 {
+		t.Fatalf("expected 450 total tokens in manager 1, got %d", s1.TotalTokens)
+	}
+
+	// --- Phase 2: Simulate restart (Manager 2 starts fresh with same store) ---
+	mgr2 := NewManager()
+	if err := mgr2.SetSessionStore(store); err != nil {
+		t.Fatalf("failed to restore sessions in manager 2: %v", err)
+	}
+
+	// Verify manager 2 loaded the existing session
+	restoredList := mgr2.ListSessions()
+	if len(restoredList) != 1 {
+		t.Fatalf("expected 1 session restored in manager 2, got %d", len(restoredList))
+	}
+	restored := restoredList[0]
+	if restored.ID != "sess-restart" {
+		t.Errorf("expected session ID 'sess-restart', got %s", restored.ID)
+	}
+	if restored.Client != "Claude Code" {
+		t.Errorf("expected client 'Claude Code', got %s", restored.Client)
+	}
+	if restored.RequestCount != 2 {
+		t.Errorf("expected request count 2 restored, got %d", restored.RequestCount)
+	}
+	if restored.TotalTokens != 450 {
+		t.Errorf("expected total tokens 450 restored, got %d", restored.TotalTokens)
+	}
+	if len(restored.RecentRequests) != 2 {
+		t.Fatalf("expected 2 recent requests restored, got %d", len(restored.RecentRequests))
+	}
+
+	// --- Phase 3: Client sends next prompt turn after restart ---
+	sContinued := mgr2.GetOrCreate("sess-restart", "127.0.0.1", "claude-code/1.0", "Claude Code")
+	if sContinued.ID != "sess-restart" {
+		t.Errorf("expected continued session ID 'sess-restart', got %s", sContinued.ID)
+	}
+
+	// Record request 3 in the continued session
+	mgr2.RecordRequest(sContinued.ID, RequestRecord{
+		ID:                   "req-3",
+		Provider:             "anthropic",
+		Model:                "claude-3-7-sonnet",
+		InputTokens:          300,
+		OutputTokens:         150,
+		TotalTokens:          450,
+		GenerationDurationMs: 3000,
+		Status:               "success",
+	})
+
+	if sContinued.RequestCount != 3 {
+		t.Errorf("expected request count 3 after continuation, got %d", sContinued.RequestCount)
+	}
+	if sContinued.TotalTokens != 900 {
+		t.Errorf("expected total tokens 900 after continuation, got %d", sContinued.TotalTokens)
+	}
+	if len(sContinued.RecentRequests) != 3 {
+		t.Errorf("expected 3 recent requests, got %d", len(sContinued.RecentRequests))
+	}
+
+	summary := mgr2.GetSummary()
+	if summary.TotalSessions != 1 {
+		t.Errorf("expected 1 total session in summary, got %d", summary.TotalSessions)
+	}
+	if summary.TotalRequests != 3 {
+		t.Errorf("expected 3 total requests in summary, got %d", summary.TotalRequests)
+	}
+	if summary.TotalTokens != 900 {
+		t.Errorf("expected 900 total tokens in summary, got %d", summary.TotalTokens)
+	}
+}
