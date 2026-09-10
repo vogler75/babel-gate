@@ -186,8 +186,23 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "selectAllModels") || !contains(html, "Generate OpenCode Config") || !contains(html, "generateOpenCodeConfig") {
 		t.Errorf("expected selectable models and OpenCode configuration generator in dashboard HTML")
 	}
+	if !contains(html, "Generate Claude Code Config") || !contains(html, "generateClaudeCodeConfig") {
+		t.Errorf("expected Claude Code configuration generator in dashboard HTML")
+	}
+	if !contains(html, "modelPicker") || !contains(html, "replaceBuiltInOptions") || !contains(html, "copyClaudeCodeConfig") {
+		t.Errorf("expected Claude Code modelPicker JSON and copy control in dashboard HTML")
+	}
+	if !contains(html, "settings.json") || !contains(html, "claudeCodeConfigPanel") {
+		t.Errorf("expected Claude Code settings.json panel and hint in dashboard HTML")
+	}
 	if !contains(html, "@ai-sdk/openai-compatible") || !contains(html, "copyOpenCodeConfig") {
 		t.Errorf("expected OpenCode provider JSON and copy control in dashboard HTML")
+	}
+	if !contains(html, "formatConfigFragment") {
+		t.Errorf("expected formatConfigFragment helper in dashboard HTML")
+	}
+	if !contains(html, "scrollIntoView") {
+		t.Errorf("expected auto-scrolling to config panel in dashboard HTML")
 	}
 	if !contains(html, "model.provider + '/' + model.id") {
 		t.Errorf("expected OpenCode model name to be formatted as <provider>/<modelname>")

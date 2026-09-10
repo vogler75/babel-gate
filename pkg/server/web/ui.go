@@ -365,8 +365,8 @@ const dashboardHTML = `<!DOCTYPE html>
     .model-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
     .model-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-bottom: .75rem; }
     .model-actions button:disabled { opacity: .5; cursor: not-allowed; }
-    #openCodeConfigPanel { margin-top: 1rem; }
-    #openCodeConfigOutput { max-height: 360px; white-space: pre; }
+    #openCodeConfigPanel, #claudeCodeConfigPanel { margin-top: 1rem; }
+    #openCodeConfigOutput, #claudeCodeConfigOutput { max-height: 360px; white-space: pre; }
     
     .token-in { color: var(--stat-in); font-weight: 600; font-family: ui-monospace, monospace; }
     .token-out { color: var(--stat-out); font-weight: 600; font-family: ui-monospace, monospace; }
@@ -613,6 +613,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="model-actions">
         <span class="muted" id="selectedModelCount">0 models selected</span>
         <button id="generateOpenCodeButton" class="btn-sm" onclick="generateOpenCodeConfig()" disabled>Generate OpenCode Config</button>
+        <button id="generateClaudeCodeButton" class="btn-sm" onclick="generateClaudeCodeConfig()" disabled>Generate Claude Code Config</button>
       </div>
       <div style="overflow-x: auto;">
         <table>
@@ -631,6 +632,14 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
         <pre id="openCodeConfigOutput"></pre>
         <div class="muted">Merge this fragment into your <code>opencode.json</code> configuration.</div>
+      </div>
+      <div id="claudeCodeConfigPanel" hidden>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:.75rem;">
+          <strong>Claude Code configuration fragment</strong>
+          <button id="copyClaudeCodeButton" class="btn-sm" onclick="copyClaudeCodeConfig()">Copy JSON</button>
+        </div>
+        <pre id="claudeCodeConfigOutput"></pre>
+        <div class="muted">Add or merge this <code>modelPicker</code> block into your Claude Code <code>settings.json</code> (user settings at <code>~/.claude/settings.json</code> or project settings at <code>.claude/settings.json</code>). Make sure <code>ANTHROPIC_BASE_URL</code> points to your BabelGate server (e.g. <code><span id="claudeCodeBaseUrl">http://localhost:8080</span></code>).</div>
       </div>
     </div>
 
@@ -1184,7 +1193,7 @@ const dashboardHTML = `<!DOCTYPE html>
         checkbox.type = 'checkbox';
         checkbox.className = 'model-select opencode-model-checkbox';
         checkbox.checked = selectedOpenCodeModels.has(openCodeModelKey(m));
-        checkbox.setAttribute('aria-label', 'Select ' + m.id + ' for OpenCode');
+        checkbox.setAttribute('aria-label', 'Select ' + m.id);
         checkbox.onchange = () => {
           const key = openCodeModelKey(m);
           if (checkbox.checked) selectedOpenCodeModels.add(key);
@@ -1206,6 +1215,8 @@ const dashboardHTML = `<!DOCTYPE html>
       const selectedCount = selectedOpenCodeModels.size;
       document.getElementById('selectedModelCount').textContent = selectedCount + (selectedCount === 1 ? ' model selected' : ' models selected');
       document.getElementById('generateOpenCodeButton').disabled = selectedCount === 0;
+      const claudeBtn = document.getElementById('generateClaudeCodeButton');
+      if (claudeBtn) claudeBtn.disabled = selectedCount === 0;
       const selectAll = document.getElementById('selectAllModels');
       const visibleModels = filteredCatalogModels();
       const visibleSelected = visibleModels.filter(model => selectedOpenCodeModels.has(openCodeModelKey(model))).length;
@@ -1221,6 +1232,15 @@ const dashboardHTML = `<!DOCTYPE html>
       });
       document.querySelectorAll('.opencode-model-checkbox').forEach(input => { input.checked = checked; });
       updateOpenCodeSelectionControls();
+    }
+
+    function formatConfigFragment(obj) {
+      const raw = JSON.stringify(obj, null, 2);
+      const lines = raw.split('\n');
+      if (lines.length >= 2 && lines[0].trim() === '{' && lines[lines.length - 1].trim() === '}') {
+        return lines.slice(1, -1).map(line => line.startsWith('  ') ? line.slice(2) : line).join('\n');
+      }
+      return raw;
     }
 
     function generateOpenCodeConfig() {
@@ -1249,13 +1269,81 @@ const dashboardHTML = `<!DOCTYPE html>
           }
         }
       };
-      document.getElementById('openCodeConfigOutput').textContent = JSON.stringify(fragment, null, 2);
-      document.getElementById('openCodeConfigPanel').hidden = false;
+      document.getElementById('openCodeConfigOutput').textContent = formatConfigFragment(fragment);
+      const panel = document.getElementById('openCodeConfigPanel');
+      panel.hidden = false;
+      const claudePanel = document.getElementById('claudeCodeConfigPanel');
+      if (claudePanel) claudePanel.hidden = true;
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     async function copyOpenCodeConfig() {
       const text = document.getElementById('openCodeConfigOutput').textContent;
       const button = document.getElementById('copyOpenCodeButton');
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }
+        button.textContent = 'Copied! ✓';
+        setTimeout(() => { button.textContent = 'Copy JSON'; }, 2000);
+      } catch (err) {
+        button.textContent = 'Copy failed';
+        setTimeout(() => { button.textContent = 'Copy JSON'; }, 2000);
+      }
+    }
+
+    function generateClaudeCodeConfig() {
+      const selected = catalogModels.filter(model => selectedOpenCodeModels.has(openCodeModelKey(model)));
+      if (selected.length === 0) return;
+
+      const options = selected.map(model => {
+        let modelID = model.id;
+        if (model.type !== 'alias' && model.provider) {
+          modelID = model.provider + '/' + model.id;
+        }
+        const label = model.type === 'alias' ? model.id : (model.display_name || model.id);
+        const description = model.description ||
+          (model.type === 'alias' && model.target ? ('Routes to ' + model.target) :
+          (model.provider ? (model.provider.toUpperCase() + ' - ' + label) : label));
+        return {
+          model: modelID,
+          label: label,
+          description: description
+        };
+      });
+
+      const origin = window.location.origin && window.location.origin !== 'null'
+        ? window.location.origin.replace(/\/$/, '')
+        : 'http://localhost:8080';
+      const baseUrlEl = document.getElementById('claudeCodeBaseUrl');
+      if (baseUrlEl) baseUrlEl.textContent = origin;
+
+      const fragment = {
+        modelPicker: {
+          options: options,
+          replaceBuiltInOptions: true
+        }
+      };
+      document.getElementById('claudeCodeConfigOutput').textContent = formatConfigFragment(fragment);
+      const panel = document.getElementById('claudeCodeConfigPanel');
+      panel.hidden = false;
+      const openCodePanel = document.getElementById('openCodeConfigPanel');
+      if (openCodePanel) openCodePanel.hidden = true;
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    async function copyClaudeCodeConfig() {
+      const text = document.getElementById('claudeCodeConfigOutput').textContent;
+      const button = document.getElementById('copyClaudeCodeButton');
       try {
         if (navigator.clipboard && window.isSecureContext) {
           await navigator.clipboard.writeText(text);
