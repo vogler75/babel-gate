@@ -125,6 +125,39 @@ func TestSessionManagerRecordRequestAndSummary(t *testing.T) {
 	}
 }
 
+func TestRecordRequestFallsBackFromImplausibleGenerationDuration(t *testing.T) {
+	mgr := NewManager()
+	store := newMockSessionStore()
+	if err := mgr.SetSessionStore(store); err != nil {
+		t.Fatalf("SetSessionStore failed: %v", err)
+	}
+	sess := mgr.GetOrCreate("sess-speed-guard", "127.0.0.1", "test-agent", "TestClient")
+
+	mgr.RecordRequest(sess.ID, RequestRecord{
+		ID:                   "req-speed-guard",
+		DurationMs:           55_013,
+		GenerationDurationMs: 243,
+		OutputTokens:         8_983,
+		Status:               "success",
+	})
+
+	got := mgr.ListSessions()[0].RecentRequests[0]
+	if got.GenerationDurationMs != 55_013 {
+		t.Fatalf("expected generation duration to fall back to 55013ms, got %d", got.GenerationDurationMs)
+	}
+	if got.TokensPerSecond < 163.2 || got.TokensPerSecond > 163.4 {
+		t.Fatalf("expected corrected speed near 163.3 tok/s, got %.2f", got.TokensPerSecond)
+	}
+
+	persisted := store.requests[sess.ID][0]
+	if persisted.GenerationDurationMs != 55_013 {
+		t.Fatalf("expected corrected generation duration to be persisted, got %d", persisted.GenerationDurationMs)
+	}
+	if persisted.TokensPerSecond != got.TokensPerSecond {
+		t.Fatalf("expected persisted speed %.2f, got %.2f", got.TokensPerSecond, persisted.TokensPerSecond)
+	}
+}
+
 func TestContextTracksLatestRequestIncludingEstimatesAndCompaction(t *testing.T) {
 	mgr := NewManager()
 	sess := mgr.GetOrCreate("sess-context", "127.0.0.1", "test-agent", "TestClient")

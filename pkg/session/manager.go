@@ -13,6 +13,8 @@ import (
 	"github.com/vogler75/babel-gate/pkg/canonical"
 )
 
+const maxPlausibleTokensPerSecond = 1000.0
+
 // MetricsRecorder defines an interface for persisting hourly usage counters.
 type MetricsRecorder interface {
 	Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error
@@ -276,8 +278,13 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		generationDurationMs = rec.DurationMs
 	}
 	if rec.OutputTokens > 0 && generationDurationMs > 0 {
+		impliedTPS := float64(rec.OutputTokens) * 1000 / float64(generationDurationMs)
+		if impliedTPS > maxPlausibleTokensPerSecond && rec.DurationMs > generationDurationMs {
+			generationDurationMs = rec.DurationMs
+		}
 		rec.TokensPerSecond = float64(rec.OutputTokens) * 1000 / float64(generationDurationMs)
 	}
+	rec.GenerationDurationMs = generationDurationMs
 
 	// Always ensure the model name is prefixed with the provider name for tracking and stats
 	if rec.Provider != "" && rec.Provider != "unknown" && rec.Model != "" {

@@ -406,8 +406,19 @@ func TestStore_GetModelSpeedMetrics(t *testing.T) {
 		TokensPerSecond:      0.0,
 		Status:               "success",
 	}
+	// Anomaly 4: Duration clears the minimum, but implied speed is implausible -> should be ignored
+	reqSpike := session.RequestRecord{
+		ID:                   "r_spike",
+		Timestamp:            now.Add(9 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-flash",
+		OutputTokens:         8_983,
+		GenerationDurationMs: 243,
+		TokensPerSecond:      36_967.1,
+		Status:               "success",
+	}
 
-	for _, r := range []session.RequestRecord{req1, req2, req3, reqErr, reqMicro, reqZero} {
+	for _, r := range []session.RequestRecord{req1, req2, req3, reqErr, reqMicro, reqZero, reqSpike} {
 		if err := store.SaveRequest(sessID, r); err != nil {
 			t.Fatalf("SaveRequest failed: %v", err)
 		}

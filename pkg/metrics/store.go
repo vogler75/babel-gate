@@ -13,6 +13,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const maxPlausibleTokensPerSecond = 1000.0
+
 // ModelMetric captures aggregated counters for a specific model within a bucket.
 type ModelMetric struct {
 	Model        string `json:"model"`
@@ -676,8 +678,9 @@ func (s *Store) GetModelSpeedMetrics(start, end time.Time, granularity, provider
 	  AND status = 'success'
 	  AND output_tokens > 0
 	  AND generation_duration_ms >= 50
+	  AND (output_tokens * 1000.0 / generation_duration_ms) <= ?
 	`
-	overallArgs := []any{startStr, endStr}
+	overallArgs := []any{startStr, endStr, maxPlausibleTokensPerSecond}
 	if providerFilter != "" && providerFilter != "all" {
 		overallQuery += " AND provider = ?"
 		overallArgs = append(overallArgs, providerFilter)
@@ -725,8 +728,9 @@ func (s *Store) GetModelSpeedMetrics(start, end time.Time, granularity, provider
 	  AND status = 'success'
 	  AND output_tokens > 0
 	  AND generation_duration_ms >= 50
+	  AND (output_tokens * 1000.0 / generation_duration_ms) <= ?
 	`
-	bucketArgs := []any{strftimeFmt, startStr, endStr}
+	bucketArgs := []any{strftimeFmt, startStr, endStr, maxPlausibleTokensPerSecond}
 	if providerFilter != "" && providerFilter != "all" {
 		bucketQuery += " AND provider = ?"
 		bucketArgs = append(bucketArgs, providerFilter)
