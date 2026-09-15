@@ -553,16 +553,21 @@ func (m *Manager) cleanupOldSessionsLocked(now time.Time) {
 	}
 }
 
-// EstimateTokens provides a fallback token count estimation (~4 characters per token).
-func EstimateTokens(text string) int {
-	if text == "" {
+// EstimateTokensFromChars provides a fallback token count estimation (~4 characters per token) from character length.
+func EstimateTokensFromChars(n int) int {
+	if n <= 0 {
 		return 0
 	}
-	count := len(text) / 4
+	count := n / 4
 	if count < 1 {
 		count = 1
 	}
 	return count
+}
+
+// EstimateTokens provides a fallback token count estimation (~4 characters per token).
+func EstimateTokens(text string) int {
+	return EstimateTokensFromChars(len(text))
 }
 
 // EstimateRequestTokens calculates estimated prompt tokens from a CanonicalRequest.
@@ -592,5 +597,5 @@ func EstimateRequestTokens(req *canonical.CanonicalRequest) int {
 		}
 	}
 
-	return EstimateTokens(strings.Repeat("a", totalChars))
+	return EstimateTokensFromChars(totalChars)
 }

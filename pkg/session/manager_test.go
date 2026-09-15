@@ -544,3 +544,35 @@ func TestSessionModelSwitchingAndUsageStats(t *testing.T) {
 		t.Errorf("expected claude percent req ~33.3%%, got %.2f%%", claudeStat.PercentReq)
 	}
 }
+
+func TestEstimateTokensFromChars(t *testing.T) {
+	cases := []struct {
+		chars int
+		want  int
+	}{
+		{-5, 0},
+		{0, 0},
+		{1, 1},
+		{2, 1},
+		{3, 1},
+		{4, 1},
+		{7, 1},
+		{8, 2},
+		{16, 4},
+		{100, 25},
+	}
+
+	for _, tc := range cases {
+		if got := EstimateTokensFromChars(tc.chars); got != tc.want {
+			t.Errorf("EstimateTokensFromChars(%d) = %d, want %d", tc.chars, got, tc.want)
+		}
+	}
+
+	// Verify EstimateTokens string delegates to EstimateTokensFromChars
+	if got := EstimateTokens("hello"); got != EstimateTokensFromChars(5) {
+		t.Errorf("EstimateTokens mismatch: got %d, want %d", got, EstimateTokensFromChars(5))
+	}
+	if got := EstimateTokens(""); got != 0 {
+		t.Errorf("EstimateTokens(\"\") = %d, want 0", got)
+	}
+}

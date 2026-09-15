@@ -346,3 +346,135 @@ func TestIssue2AnthropicThinkingControlsRoundTrip(t *testing.T) {
 		t.Fatalf("thinking controls lost on output: %+v", wire.Thinking)
 	}
 }
+
+func TestAnthropicThinkingDisabledOmitted(t *testing.T) {
+	budget := 0
+	req := &canonical.CanonicalRequest{
+		Model: "claude-test",
+		Thinking: &canonical.ThinkingConfig{
+			Type:         "disabled",
+			BudgetTokens: &budget,
+		},
+		Messages: []canonical.Message{{Role: canonical.RoleUser, Parts: []canonical.ContentPart{{Type: canonical.PartText, Text: "hi"}}}},
+	}
+	wire, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.Thinking != nil {
+		t.Fatalf("expected Thinking to be nil when disabled, got: %+v", wire.Thinking)
+	}
+}
+
+func TestAnthropicThinkingBudgetClamping(t *testing.T) {
+	smallBudget := 500
+	maxTok := 800
+	req := &canonical.CanonicalRequest{
+		Model: "claude-test",
+		Params: canonical.Parameters{
+			MaxTokens: &maxTok,
+		},
+		Thinking: &canonical.ThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: &smallBudget,
+		},
+		Messages: []canonical.Message{{Role: canonical.RoleUser, Parts: []canonical.ContentPart{{Type: canonical.PartText, Text: "hi"}}}},
+	}
+	wire, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.Thinking == nil || wire.Thinking.BudgetTokens == nil || *wire.Thinking.BudgetTokens != 1024 {
+		t.Fatalf("expected budget clamped to 1024, got: %+v", wire.Thinking)
+	}
+	if wire.MaxTokens <= *wire.Thinking.BudgetTokens {
+		t.Fatalf("expected MaxTokens (%d) > budget (%d)", wire.MaxTokens, *wire.Thinking.BudgetTokens)
+	}
+}
+
+func TestAnthropicDropUnsignedThinking(t *testing.T) {
+	req := &canonical.CanonicalRequest{
+		Model: "claude-test",
+		Messages: []canonical.Message{
+			{
+				Role: canonical.RoleAssistant,
+				Parts: []canonical.ContentPart{
+					{
+						Type:                     canonical.PartThinking,
+						Thinking:                 "google thought",
+						ThoughtSignature:         "sig_from_google",
+						ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
+					},
+					{
+						Type:     canonical.PartThinking,
+						Thinking: "unsigned thought",
+					},
+					{
+						Type: canonical.PartText,
+						Text: "hello user",
+					},
+				},
+			},
+		},
+	}
+	wire, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Messages) != 1 {
+		t.Fatalf("expected 1 message, got: %d", len(wire.Messages))
+	}
+	// Only text part remains since thinking blocks without valid Anthropic signature were dropped
+	if text, ok := wire.Messages[0].Content.(string); ok {
+		if text != "hello user" {
+			t.Errorf("expected text 'hello user', got: %q", text)
+		}
+	} else if blocks, ok := wire.Messages[0].Content.([]ContentBlock); ok {
+		if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "hello user" {
+			t.Errorf("expected 1 text block, got: %+v", blocks)
+		}
+	} else {
+		t.Fatalf("unexpected message content type: %T", wire.Messages[0].Content)
+	}
+}
+
+func TestAnthropicRedactedThinkingRoundTrip(t *testing.T) {
+	// FromAnthropicResponse with redacted_thinking
+	resp := &MessageResponse{
+		ID:    "msg_redacted",
+		Model: "claude-test",
+		Content: []ContentBlock{
+			{
+				Type: "redacted_thinking",
+				Data: "encrypted_sig_bytes",
+			},
+			{
+				Type: "text",
+				Text: "final response",
+			},
+		},
+	}
+	canonResp, err := FromAnthropicResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonResp.Message.Parts) != 2 {
+		t.Fatalf("expected 2 parts, got: %d", len(canonResp.Message.Parts))
+	}
+	p0 := canonResp.Message.Parts[0]
+	if p0.Type != canonical.PartThinking || p0.ThoughtSignature != "encrypted_sig_bytes" || p0.ThoughtSignatureProvider != canonical.SignatureProviderAnthropic {
+		t.Errorf("unexpected part 0: %+v", p0)
+	}
+
+	// Back ToAnthropicResponse
+	backResp, err := ToAnthropicResponse(canonResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backResp.Content) != 2 {
+		t.Fatalf("expected 2 content blocks, got: %d", len(backResp.Content))
+	}
+	if backResp.Content[0].Type != "redacted_thinking" || backResp.Content[0].Data != "encrypted_sig_bytes" {
+		t.Errorf("expected redacted_thinking block, got: %+v", backResp.Content[0])
+	}
+}

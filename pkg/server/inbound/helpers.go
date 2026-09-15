@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/router"
 	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
@@ -127,4 +128,59 @@ func ResolveSession(sessions *session.Manager, r *http.Request) *session.Session
 	clientHeader := r.Header.Get("x-client")
 	clientName := session.DetectClient(clientHeader, r.UserAgent())
 	return sessions.GetOrCreate(sessID, clientIP, r.UserAgent(), clientName)
+}
+
+// StreamUsageTracker maintains input, output, and total token accounting for streaming requests.
+type StreamUsageTracker struct {
+	InTokens          int
+	OutTokens         int
+	TotalTokens       int
+	CachedInputTokens int
+	ReasoningTokens   int
+	InputEstimated    bool
+}
+
+func NewStreamUsageTracker(estInTokens int) *StreamUsageTracker {
+	return &StreamUsageTracker{
+		InTokens:       estInTokens,
+		InputEstimated: true,
+	}
+}
+
+func (t *StreamUsageTracker) ApplyDelta(usage *canonical.Usage) {
+	if usage == nil {
+		return
+	}
+	if usage.PromptTokens > 0 {
+		t.InTokens = usage.PromptTokens
+		t.InputEstimated = false
+	}
+	if usage.CompletionTokens > 0 {
+		t.OutTokens = usage.CompletionTokens
+	}
+	if usage.CacheReadInputTokens > 0 {
+		t.CachedInputTokens = usage.CacheReadInputTokens
+	}
+	if usage.ReasoningTokens > 0 {
+		t.ReasoningTokens = usage.ReasoningTokens
+	}
+	if usage.TotalTokens > 0 {
+		t.TotalTokens = usage.TotalTokens
+	}
+}
+
+func (t *StreamUsageTracker) ResolveTotal() int {
+	if t.TotalTokens > 0 {
+		return t.TotalTokens
+	}
+	return t.InTokens + t.OutTokens
+}
+
+func (t *StreamUsageTracker) Finalize(fallbackOutTokens int) {
+	if t.OutTokens == 0 {
+		t.OutTokens = fallbackOutTokens
+	}
+	if t.TotalTokens == 0 {
+		t.TotalTokens = t.InTokens + t.OutTokens
+	}
 }

@@ -1152,3 +1152,23 @@ func TestServerRestartSessionContinuity(t *testing.T) {
 		t.Errorf("expected 2 recent requests, got %d", len(sessResp3.Sessions[0].RecentRequests))
 	}
 }
+
+func TestStatusWriterResponseControllerCached(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: rec, status: http.StatusOK}
+	ctrl1 := sw.responseController()
+	if ctrl1 == nil {
+		t.Fatal("expected non-nil response controller")
+	}
+	ctrl2 := sw.responseController()
+	if ctrl1 != ctrl2 {
+		t.Errorf("expected same ResponseController pointer, got %p and %p", ctrl1, ctrl2)
+	}
+	if err := sw.FlushError(); err != nil {
+		t.Errorf("unexpected FlushError: %v", err)
+	}
+	ctrl3 := sw.responseController()
+	if ctrl1 != ctrl3 {
+		t.Errorf("expected ResponseController pointer preserved after FlushError, got %p and %p", ctrl1, ctrl3)
+	}
+}

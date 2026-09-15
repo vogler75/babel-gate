@@ -49,19 +49,16 @@ type Part struct {
 
 func (p *Part) UnmarshalJSON(data []byte) error {
 	type Alias Part
-	var alias Alias
-	if err := json.Unmarshal(data, &alias); err != nil {
+	var aux struct {
+		Alias
+		LegacyThoughtSignature string `json:"thought_signature"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	*p = Part(alias)
+	*p = Part(aux.Alias)
 	if p.ThoughtSignature == "" {
-		var legacy struct {
-			ThoughtSignature string `json:"thought_signature,omitempty"`
-		}
-		if err := json.Unmarshal(data, &legacy); err != nil {
-			return err
-		}
-		p.ThoughtSignature = legacy.ThoughtSignature
+		p.ThoughtSignature = aux.LegacyThoughtSignature
 	}
 	return nil
 }

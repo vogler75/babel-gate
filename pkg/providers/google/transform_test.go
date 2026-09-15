@@ -521,3 +521,81 @@ func TestClaudeCodeScenario_ToolSequence(t *testing.T) {
 		t.Errorf("expected last part to be FunctionResponse, got %+v", last.Parts)
 	}
 }
+
+func TestGooglePartUnmarshalSinglePass(t *testing.T) {
+	cases := []struct {
+		name     string
+		json     string
+		wantText string
+		wantSig  string
+	}{
+		{
+			name:     "plain text without signature",
+			json:     `{"text":"hello world"}`,
+			wantText: "hello world",
+			wantSig:  "",
+		},
+		{
+			name:     "camelCase thoughtSignature",
+			json:     `{"text":"thinking...","thought":true,"thoughtSignature":"sig_camel"}`,
+			wantText: "thinking...",
+			wantSig:  "sig_camel",
+		},
+		{
+			name:     "legacy snake_case thought_signature",
+			json:     `{"text":"thinking...","thought":true,"thought_signature":"sig_snake"}`,
+			wantText: "thinking...",
+			wantSig:  "sig_snake",
+		},
+		{
+			name:     "both present prefers camelCase",
+			json:     `{"text":"thinking...","thought":true,"thoughtSignature":"sig_camel","thought_signature":"sig_snake"}`,
+			wantText: "thinking...",
+			wantSig:  "sig_camel",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var p Part
+			if err := json.Unmarshal([]byte(tc.json), &p); err != nil {
+				t.Fatalf("Unmarshal failed: %v", err)
+			}
+			if p.Text != tc.wantText {
+				t.Errorf("got text %q, want %q", p.Text, tc.wantText)
+			}
+			if p.ThoughtSignature != tc.wantSig {
+				t.Errorf("got signature %q, want %q", p.ThoughtSignature, tc.wantSig)
+			}
+		})
+	}
+}
+
+func TestResolveThoughtSignature(t *testing.T) {
+	// Google provider keeps signature verbatim (even empty)
+	if got := ResolveThoughtSignature("orig_sig", canonical.SignatureProviderGoogle, "sess", "call1"); got != "orig_sig" {
+		t.Errorf("expected orig_sig, got %q", got)
+	}
+	if got := ResolveThoughtSignature("", canonical.SignatureProviderGoogle, "sess", "call1"); got != "" {
+		t.Errorf("expected empty string preserved for parallel Google call, got %q", got)
+	}
+
+	// Foreign provider (Anthropic, OpenAI) returns validator bypass sentinel
+	if got := ResolveThoughtSignature("anthropic_sig", canonical.SignatureProviderAnthropic, "sess", "call1"); got != SkipThoughtSignatureValidator {
+		t.Errorf("expected skip sentinel for foreign provider, got %q", got)
+	}
+
+	// Empty provider with cached signature recovers from cache
+	storeThoughtSignaturePresenceForScope("sess_cache_test", "call_cached", "cached_sig_123")
+	if got := ResolveThoughtSignature("", "", "sess_cache_test", "call_cached"); got != "cached_sig_123" {
+		t.Errorf("expected recovered cached_sig_123, got %q", got)
+	}
+
+	// Empty provider without cache falls back to provided sig or sentinel
+	if got := ResolveThoughtSignature("some_sig", "", "sess_cache_test", "call_unknown"); got != "some_sig" {
+		t.Errorf("expected some_sig, got %q", got)
+	}
+	if got := ResolveThoughtSignature("", "", "sess_cache_test", "call_unknown"); got != SkipThoughtSignatureValidator {
+		t.Errorf("expected skip sentinel, got %q", got)
+	}
+}

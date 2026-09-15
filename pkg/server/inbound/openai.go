@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -180,12 +179,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixMilli())
 	created := time.Now().Unix()
 
-	inTokens := estInTokens
-	inputEstimated := true
-	outTokens := 0
-	cachedInputTokens := 0
-	reasoningTokens := 0
-	totalTokens := 0
+	usageTracker := NewStreamUsageTracker(estInTokens)
 	totalChars := 0
 	streamStatus := "success"
 	var streamErr string
@@ -199,24 +193,16 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	defer func() {
-		if outTokens == 0 {
-			outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
-		}
-		if inTokens == 0 {
-			inTokens = estInTokens
-		}
-		if totalTokens == 0 {
-			totalTokens = inTokens + outTokens
-		}
+		usageTracker.Finalize(session.EstimateTokensFromChars(totalChars))
 		if tr != nil {
-			tr.SetTokens(inTokens, outTokens)
+			tr.SetTokens(usageTracker.InTokens, usageTracker.OutTokens)
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider: prov, Model: trackingModel, Stream: true,
 				DurationMs: time.Since(startTime).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-				InputTokens: inTokens, InputTokensEstimated: inputEstimated, OutputTokens: outTokens, CachedInputTokens: cachedInputTokens, ReasoningTokens: reasoningTokens, TotalTokens: totalTokens,
+				InputTokens: usageTracker.InTokens, InputTokensEstimated: usageTracker.InputEstimated, OutputTokens: usageTracker.OutTokens, CachedInputTokens: usageTracker.CachedInputTokens, ReasoningTokens: usageTracker.ReasoningTokens, TotalTokens: usageTracker.TotalTokens,
 				Status: streamStatus, ErrorMessage: streamErr,
 			})
 		}
@@ -323,18 +309,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 				}
 			}
 			if ev.Usage != nil {
-				if ev.Usage.PromptTokens > 0 {
-					inTokens = ev.Usage.PromptTokens
-					inputEstimated = false
-				}
-				if ev.Usage.CompletionTokens > 0 {
-					outTokens = ev.Usage.CompletionTokens
-				}
-				cachedInputTokens = ev.Usage.CacheReadInputTokens
-				reasoningTokens = ev.Usage.ReasoningTokens
-				if ev.Usage.TotalTokens > 0 {
-					totalTokens = ev.Usage.TotalTokens
-				}
+				usageTracker.ApplyDelta(ev.Usage)
 			}
 		case canonical.EventMessageDone:
 			sawDone = true
@@ -349,15 +324,7 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		}
 		return
 	}
-	if outTokens == 0 {
-		outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
-	}
-	if inTokens == 0 {
-		inTokens = estInTokens
-	}
-	if totalTokens == 0 {
-		totalTokens = inTokens + outTokens
-	}
+	usageTracker.Finalize(session.EstimateTokensFromChars(totalChars))
 
 	usageChunk := map[string]any{
 		"id":      id,
@@ -366,11 +333,11 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		"model":   canonReq.Model,
 		"choices": []any{},
 		"usage": map[string]any{
-			"prompt_tokens":             inTokens,
-			"completion_tokens":         outTokens,
-			"total_tokens":              totalTokens,
-			"prompt_tokens_details":     map[string]any{"cached_tokens": cachedInputTokens},
-			"completion_tokens_details": map[string]any{"reasoning_tokens": reasoningTokens},
+			"prompt_tokens":             usageTracker.InTokens,
+			"completion_tokens":         usageTracker.OutTokens,
+			"total_tokens":              usageTracker.ResolveTotal(),
+			"prompt_tokens_details":     map[string]any{"cached_tokens": usageTracker.CachedInputTokens},
+			"completion_tokens_details": map[string]any{"reasoning_tokens": usageTracker.ReasoningTokens},
 		},
 	}
 	if err := stream.data(usageChunk); err != nil {

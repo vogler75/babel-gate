@@ -224,12 +224,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 	stream := newSSEWriter(w)
 
-	inTokens := estInTokens
-	inputEstimated := true
-	outTokens := 0
-	cachedInputTokens := 0
-	reasoningTokens := 0
-	totalTokens := 0
+	usageTracker := NewStreamUsageTracker(estInTokens)
 	totalChars := 0
 	streamStatus := "success"
 	var streamErr string
@@ -243,24 +238,16 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		}
 	}
 	defer func() {
-		if outTokens == 0 {
-			outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
-		}
-		if inTokens == 0 {
-			inTokens = estInTokens
-		}
-		if totalTokens == 0 {
-			totalTokens = inTokens + outTokens
-		}
+		usageTracker.Finalize(session.EstimateTokensFromChars(totalChars))
 		if tr != nil {
-			tr.SetTokens(inTokens, outTokens)
+			tr.SetTokens(usageTracker.InTokens, usageTracker.OutTokens)
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider: prov, Model: trackingModel, Stream: true,
 				DurationMs: time.Since(startTime).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-				InputTokens: inTokens, InputTokensEstimated: inputEstimated, OutputTokens: outTokens, CachedInputTokens: cachedInputTokens, ReasoningTokens: reasoningTokens, TotalTokens: totalTokens,
+				InputTokens: usageTracker.InTokens, InputTokensEstimated: usageTracker.InputEstimated, OutputTokens: usageTracker.OutTokens, CachedInputTokens: usageTracker.CachedInputTokens, ReasoningTokens: usageTracker.ReasoningTokens, TotalTokens: usageTracker.TotalTokens,
 				Status: streamStatus, ErrorMessage: streamErr,
 			})
 		}
@@ -299,7 +286,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		if ev.Type == canonical.EventThinkingDelta && ev.Thinking != "" {
 			totalChars += len(ev.Thinking)
 			part := map[string]any{"text": ev.Thinking, "thought": true}
-			if ev.ThoughtSignature != "" && (ev.ThoughtSignatureProvider == "" || ev.ThoughtSignatureProvider == "google") {
+			if ev.ThoughtSignature != "" && (ev.ThoughtSignatureProvider == "" || ev.ThoughtSignatureProvider == canonical.SignatureProviderGoogle) {
 				part["thoughtSignature"] = ev.ThoughtSignature
 			}
 			chunk := map[string]any{"candidates": []any{map[string]any{"index": ev.CandidateIndex, "content": map[string]any{"role": "model", "parts": []any{part}}}}}
@@ -328,17 +315,11 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		}
 
 		if ev.Type == canonical.EventToolCallDone {
-			signature := ev.ThoughtSignature
-			switch ev.ThoughtSignatureProvider {
-			case "google":
-				// Preserve an intentional omission on later parallel calls.
-			case "":
-				if signature == "" {
-					signature = "skip_thought_signature_validator"
-				}
-			default:
-				signature = "skip_thought_signature_validator"
+			scope := ""
+			if sess != nil {
+				scope = sess.ID
 			}
+			signature := google.ResolveThoughtSignature(ev.ThoughtSignature, ev.ThoughtSignatureProvider, scope, ev.ToolCallID)
 			part := map[string]any{
 				"functionCall": map[string]any{
 					"id":   ev.ToolCallID,
@@ -367,21 +348,13 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 
 		if ev.Type == canonical.EventMessageDelta {
 			if ev.Usage != nil {
-				if ev.Usage.PromptTokens > 0 {
-					inTokens = ev.Usage.PromptTokens
-					inputEstimated = false
-				}
-				if ev.Usage.CompletionTokens > 0 {
-					outTokens = ev.Usage.CompletionTokens
-				}
-				cachedInputTokens = ev.Usage.CacheReadInputTokens
-				reasoningTokens = ev.Usage.ReasoningTokens
-				if ev.Usage.TotalTokens > 0 {
-					totalTokens = ev.Usage.TotalTokens
-				}
+				usageTracker.ApplyDelta(ev.Usage)
 				if !send(map[string]any{"usageMetadata": map[string]any{
-					"promptTokenCount": inTokens, "candidatesTokenCount": outTokens, "totalTokenCount": totalTokens,
-					"cachedContentTokenCount": cachedInputTokens, "thoughtsTokenCount": reasoningTokens,
+					"promptTokenCount":        usageTracker.InTokens,
+					"candidatesTokenCount":    usageTracker.OutTokens,
+					"totalTokenCount":         usageTracker.ResolveTotal(),
+					"cachedContentTokenCount": usageTracker.CachedInputTokens,
+					"thoughtsTokenCount":      usageTracker.ReasoningTokens,
 				}}) {
 					return
 				}

@@ -566,12 +566,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 	currentBlockIndex := 0
 	activeBlockType := "" // "text", "thinking", "tool_use"
 	stopReason := "end_turn"
-	inTokens := estInTokens
-	inputEstimated := true
-	outTokens := 0
-	cachedInputTokens := 0
-	reasoningTokens := 0
-	totalTokens := 0
+	usageTracker := NewStreamUsageTracker(estInTokens)
 	totalTextChars := 0
 	streamStatus := "success"
 	var streamErr string
@@ -585,17 +580,9 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	defer func() {
-		if outTokens == 0 {
-			outTokens = session.EstimateTokens(strings.Repeat("a", totalTextChars))
-		}
-		if inTokens == 0 {
-			inTokens = estInTokens
-		}
-		if totalTokens == 0 {
-			totalTokens = inTokens + outTokens
-		}
+		usageTracker.Finalize(session.EstimateTokensFromChars(totalTextChars))
 		if tr != nil {
-			tr.SetTokens(inTokens, outTokens)
+			tr.SetTokens(usageTracker.InTokens, usageTracker.OutTokens)
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
@@ -605,12 +592,12 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				Stream:               true,
 				DurationMs:           time.Since(startTime).Milliseconds(),
 				GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-				InputTokens:          inTokens,
-				InputTokensEstimated: inputEstimated,
-				OutputTokens:         outTokens,
-				CachedInputTokens:    cachedInputTokens,
-				ReasoningTokens:      reasoningTokens,
-				TotalTokens:          totalTokens,
+				InputTokens:          usageTracker.InTokens,
+				InputTokensEstimated: usageTracker.InputEstimated,
+				OutputTokens:         usageTracker.OutTokens,
+				CachedInputTokens:    usageTracker.CachedInputTokens,
+				ReasoningTokens:      usageTracker.ReasoningTokens,
+				TotalTokens:          usageTracker.TotalTokens,
 				Status:               streamStatus,
 				ErrorMessage:         streamErr,
 			})
@@ -684,9 +671,8 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 
 		switch ev.Type {
 		case canonical.EventMessageStart:
-			if ev.Usage != nil && ev.Usage.PromptTokens > 0 {
-				inTokens = ev.Usage.PromptTokens
-				inputEstimated = false
+			if ev.Usage != nil {
+				usageTracker.ApplyDelta(ev.Usage)
 			}
 
 		case canonical.EventThinkingDelta:
@@ -778,18 +764,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			if ev.Usage != nil {
-				if ev.Usage.PromptTokens > 0 {
-					inTokens = ev.Usage.PromptTokens
-					inputEstimated = false
-				}
-				if ev.Usage.CompletionTokens > 0 {
-					outTokens = ev.Usage.CompletionTokens
-				}
-				cachedInputTokens = ev.Usage.CacheReadInputTokens
-				reasoningTokens = ev.Usage.ReasoningTokens
-				if ev.Usage.TotalTokens > 0 {
-					totalTokens = ev.Usage.TotalTokens
-				}
+				usageTracker.ApplyDelta(ev.Usage)
 			}
 
 		case canonical.EventMessageDone:
@@ -808,12 +783,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	if outTokens == 0 {
-		outTokens = session.EstimateTokens(strings.Repeat("a", totalTextChars))
-	}
-	if inTokens == 0 {
-		inTokens = estInTokens
-	}
+	usageTracker.Finalize(session.EstimateTokensFromChars(totalTextChars))
 
 	if !write("message_delta", map[string]any{
 		"type": "message_delta",
@@ -824,8 +794,8 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		"usage": map[string]any{
 			// Google/OpenAI may only report prompt usage at the end of a stream.
 			// Anthropic clients apply this cumulative correction to message_start.
-			"input_tokens":  inTokens,
-			"output_tokens": outTokens,
+			"input_tokens":  usageTracker.InTokens,
+			"output_tokens": usageTracker.OutTokens,
 		},
 	}) {
 		return

@@ -272,3 +272,45 @@ func TestIssue2SuccessfulFallbackUsesExecutedRouteInTelemetry(t *testing.T) {
 		t.Fatalf("fallback telemetry used the wrong route: %+v", requests)
 	}
 }
+
+func TestIssue2GoogleStreamUsageTotalFallback(t *testing.T) {
+	events := []canonical.CanonicalEvent{
+		{Type: canonical.EventMessageStart},
+		{Type: canonical.EventTextDelta, Text: "hello"},
+		{
+			Type: canonical.EventMessageDelta,
+			Usage: &canonical.Usage{
+				PromptTokens:     10,
+				CompletionTokens: 5,
+				TotalTokens:      0, // Upstream omits total tokens
+			},
+		},
+		{Type: canonical.EventMessageDone},
+	}
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{},
+		Routing: config.RoutingConfig{
+			Routes: map[string]string{"gemini-test": "scripted/test-model"},
+		},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.RegisterProvider(&scriptedStreamProvider{name: "scripted", events: events})
+	handler := NewGoogleHandler(engine, router.NewCatalog(engine), nil)
+
+	recorder := httptest.NewRecorder()
+	jsonBody := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-test:streamGenerateContent?alt=sse", strings.NewReader(jsonBody))
+	handler.HandleStreamGenerateContent(recorder, req)
+
+	body := recorder.Body.String()
+	// totalTokenCount must be computed as 10 + 5 = 15, not 0
+	if !strings.Contains(body, `"totalTokenCount":15`) {
+		t.Fatalf("expected totalTokenCount:15 in stream output, got:\n%s", body)
+	}
+	if strings.Contains(body, `"totalTokenCount":0`) {
+		t.Fatalf("found invalid totalTokenCount:0 in stream output, got:\n%s", body)
+	}
+}

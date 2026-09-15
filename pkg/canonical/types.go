@@ -21,6 +21,13 @@ const (
 	PartToolResult PartType = "tool_result"
 )
 
+// Signature providers identifying which provider minted a thought signature.
+const (
+	SignatureProviderGoogle    = "google"
+	SignatureProviderAnthropic = "anthropic"
+	SignatureProviderOpenAI    = "openai"
+)
+
 // ContentPart represents a single piece of content within a Message.
 type ContentPart struct {
 	Type PartType `json:"type"`

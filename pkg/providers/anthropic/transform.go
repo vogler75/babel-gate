@@ -26,10 +26,21 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 		StopSequences: req.Params.Stop,
 		Stream:        req.Stream,
 	}
-	if req.Thinking != nil {
-		out.Thinking = &ThinkingConfig{Type: req.Thinking.Type, BudgetTokens: req.Thinking.BudgetTokens}
-		if out.Thinking.Type == "" {
-			out.Thinking.Type = "enabled"
+	if req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "") {
+		budget := 1024
+		if req.Thinking.BudgetTokens != nil && *req.Thinking.BudgetTokens > 0 {
+			budget = *req.Thinking.BudgetTokens
+		}
+		if budget < 1024 {
+			budget = 1024
+		}
+		if maxTokens <= budget {
+			maxTokens = budget + 1024
+			out.MaxTokens = maxTokens
+		}
+		out.Thinking = &ThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: &budget,
 		}
 	}
 
@@ -68,14 +79,26 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 
 			case canonical.PartThinking:
 				signature := p.ThoughtSignature
-				if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != "anthropic" {
+				if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != canonical.SignatureProviderAnthropic {
 					signature = ""
 				}
-				blocks = append(blocks, ContentBlock{
-					Type:      "thinking",
-					Thinking:  p.Thinking,
-					Signature: signature,
-				})
+				// Anthropic strictly requires valid signatures on thinking blocks.
+				// Drop thinking blocks without an Anthropic signature to avoid an HTTP 400 rejection.
+				if signature == "" {
+					continue
+				}
+				if p.Thinking == "" {
+					blocks = append(blocks, ContentBlock{
+						Type: "redacted_thinking",
+						Data: signature,
+					})
+				} else {
+					blocks = append(blocks, ContentBlock{
+						Type:      "thinking",
+						Thinking:  p.Thinking,
+						Signature: signature,
+					})
+				}
 
 			case canonical.PartImage:
 				if p.ImageData != "" {
@@ -131,6 +154,13 @@ func ToAnthropicRequest(req *canonical.CanonicalRequest) (*MessageRequest, error
 			}
 		}
 
+		if len(blocks) == 0 && len(m.Parts) > 0 {
+			blocks = append(blocks, ContentBlock{
+				Type: "text",
+				Text: " ",
+			})
+		}
+
 		if len(blocks) == 1 && blocks[0].Type == "text" {
 			out.Messages = append(out.Messages, Message{
 				Role:    anthropicRole,
@@ -163,8 +193,17 @@ func FromAnthropicResponse(resp *MessageResponse) (*canonical.CanonicalResponse,
 
 		case "thinking":
 			msg.Parts = append(msg.Parts, canonical.ContentPart{
-				Type:     canonical.PartThinking,
-				Thinking: block.Thinking,
+				Type:                     canonical.PartThinking,
+				Thinking:                 block.Thinking,
+				ThoughtSignature:         block.Signature,
+				ThoughtSignatureProvider: canonical.SignatureProviderAnthropic,
+			})
+
+		case "redacted_thinking":
+			msg.Parts = append(msg.Parts, canonical.ContentPart{
+				Type:                     canonical.PartThinking,
+				ThoughtSignature:         block.Data,
+				ThoughtSignatureProvider: canonical.SignatureProviderAnthropic,
 			})
 
 		case "tool_use":
@@ -273,7 +312,7 @@ func parseAnthropicStreamEvent(data []byte, accumulated *Usage) ([]canonical.Can
 					Type:                     canonical.EventThinkingDelta,
 					Index:                    event.Index,
 					ThoughtSignature:         event.Delta.Signature,
-					ThoughtSignatureProvider: "anthropic",
+					ThoughtSignatureProvider: canonical.SignatureProviderAnthropic,
 				})
 			case "input_json_delta":
 				out = append(out, canonical.CanonicalEvent{
@@ -421,14 +460,14 @@ func FromAnthropicRequest(req *MessageRequest) (*canonical.CanonicalRequest, err
 						Type:                     canonical.PartThinking,
 						Thinking:                 th,
 						ThoughtSignature:         sig,
-						ThoughtSignatureProvider: "anthropic",
+						ThoughtSignatureProvider: canonical.SignatureProviderAnthropic,
 					})
 				case "redacted_thinking":
 					data, _ := blockMap["data"].(string)
 					parts = append(parts, canonical.ContentPart{
 						Type:                     canonical.PartThinking,
 						ThoughtSignature:         data,
-						ThoughtSignatureProvider: "anthropic",
+						ThoughtSignatureProvider: canonical.SignatureProviderAnthropic,
 					})
 				case "image":
 					if src, ok := blockMap["source"].(map[string]any); ok {
@@ -548,10 +587,23 @@ func ToAnthropicResponse(resp *canonical.CanonicalResponse) (*MessageResponse, e
 				Text: p.Text,
 			})
 		case canonical.PartThinking:
-			blocks = append(blocks, ContentBlock{
-				Type:     "thinking",
-				Thinking: p.Thinking,
-			})
+			isAnthropic := p.ThoughtSignatureProvider == "" || p.ThoughtSignatureProvider == canonical.SignatureProviderAnthropic
+			if p.Thinking == "" && p.ThoughtSignature != "" && isAnthropic {
+				blocks = append(blocks, ContentBlock{
+					Type: "redacted_thinking",
+					Data: p.ThoughtSignature,
+				})
+			} else if p.Thinking != "" {
+				sig := p.ThoughtSignature
+				if !isAnthropic {
+					sig = ""
+				}
+				blocks = append(blocks, ContentBlock{
+					Type:      "thinking",
+					Thinking:  p.Thinking,
+					Signature: sig,
+				})
+			}
 		case canonical.PartToolCall:
 			var inputMap map[string]any
 			if p.ToolCallArgs != "" {

@@ -165,6 +165,14 @@ type statusWriter struct {
 	http.ResponseWriter
 	status      int
 	wroteHeader bool
+	rc          *http.ResponseController
+}
+
+func (w *statusWriter) responseController() *http.ResponseController {
+	if w.rc == nil {
+		w.rc = http.NewResponseController(w.ResponseWriter)
+	}
+	return w.rc
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -190,7 +198,7 @@ func (w *statusWriter) FlushError() error {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	return http.NewResponseController(w.ResponseWriter).Flush()
+	return w.responseController().Flush()
 }
 
 func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -214,7 +222,11 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		tr := trace.New(r.Method, r.URL.Path)
 		r = r.WithContext(trace.WithTrace(r.Context(), tr))
 
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		sw := &statusWriter{
+			ResponseWriter: w,
+			status:         http.StatusOK,
+			rc:             http.NewResponseController(w),
+		}
 
 		// Progress monitor for long-running requests (> 15s)
 		stopMonitor := make(chan struct{})

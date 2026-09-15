@@ -18,6 +18,34 @@ var googleToolNameConstraints = toolnames.Constraints{
 	},
 }
 
+const SkipThoughtSignatureValidator = "skip_thought_signature_validator"
+
+// ResolveThoughtSignature determines the appropriate thought signature for Google payloads.
+// Google signatures are authoritative (including intentional empty signatures for subsequent parallel tool calls).
+// For unknown providers without an explicit signature, it attempts recovery from session cache or
+// falls back to the validator bypass sentinel.
+func ResolveThoughtSignature(sig, provider, scope, callID string) string {
+	switch provider {
+	case canonical.SignatureProviderGoogle:
+		// Explicit Google signature is authoritative. Even if empty, preserve it
+		// for subsequent parallel tool calls.
+		return sig
+	case "":
+		if scope != "" && callID != "" {
+			if cached, found := lookupThoughtSignatureForScope(scope, callID); found {
+				return cached
+			}
+		}
+		if sig != "" {
+			return sig
+		}
+		return SkipThoughtSignatureValidator
+	default:
+		// Signatures from foreign providers (Anthropic, OpenAI, etc.) cannot be verified by Google.
+		return SkipThoughtSignatureValidator
+	}
+}
+
 // ToGoogleRequest converts a CanonicalRequest into a Google GenerateContentRequest.
 func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, error) {
 	req, names := toolnames.Normalize(req, googleToolNameConstraints)
@@ -155,7 +183,7 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 				case canonical.PartThinking:
 					if p.Thinking != "" {
 						signature := p.ThoughtSignature
-						if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != "google" {
+						if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != canonical.SignatureProviderGoogle {
 							signature = ""
 						}
 						parts = append(parts, Part{Text: p.Thinking, Thought: true, ThoughtSignature: signature})
@@ -171,25 +199,7 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 						args = make(map[string]any)
 					}
 
-					// Preserve Google's in-band signature state exactly. Cross-protocol
-					// histories have no signature field, so recover a scoped signature
-					// (including a known intentional omission) or use Google's validator
-					// bypass sentinel for a genuinely unknown call.
-					sig := p.ThoughtSignature
-					switch p.ThoughtSignatureProvider {
-					case "google":
-						// An empty value is meaningful for later parallel calls.
-					case "":
-						var found bool
-						if p.ToolCallID != "" {
-							sig, found = lookupThoughtSignatureForScope(req.SessionID, p.ToolCallID)
-						}
-						if !found {
-							sig = "skip_thought_signature_validator"
-						}
-					default:
-						sig = "skip_thought_signature_validator"
-					}
+					sig := ResolveThoughtSignature(p.ThoughtSignature, p.ThoughtSignatureProvider, req.SessionID, p.ToolCallID)
 
 					parts = append(parts, Part{
 						FunctionCall: &FunctionCall{
@@ -552,7 +562,7 @@ func fromGoogleResponse(resp *GenerateContentResponse, model string, names *tool
 			if part.Thought {
 				msg.Parts = append(msg.Parts, canonical.ContentPart{
 					Type: canonical.PartThinking, Thinking: part.Text,
-					ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google",
+					ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
 				})
 			} else {
 				msg.Parts = append(msg.Parts, canonical.ContentPart{
@@ -587,7 +597,7 @@ func fromGoogleResponse(resp *GenerateContentResponse, model string, names *tool
 				ToolCallName:             name,
 				ToolCallArgs:             string(argsJSON),
 				ThoughtSignature:         sig,
-				ThoughtSignatureProvider: "google",
+				ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
 			})
 		}
 	}
@@ -653,12 +663,12 @@ func parseGoogleStreamEvent(data []byte, model string, names *toolnames.Mapping,
 				if part.Thought {
 					events = append(events, canonical.CanonicalEvent{
 						Type: canonical.EventThinkingDelta, Index: cand.Index, Thinking: part.Text,
-						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google", Model: model,
+						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: canonical.SignatureProviderGoogle, Model: model,
 					})
 				} else {
 					events = append(events, canonical.CanonicalEvent{
 						Type: canonical.EventTextDelta, Index: cand.Index, Text: part.Text,
-						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google", Model: model,
+						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: canonical.SignatureProviderGoogle, Model: model,
 					})
 				}
 			}
@@ -688,7 +698,7 @@ func parseGoogleStreamEvent(data []byte, model string, names *toolnames.Mapping,
 					ToolCallID:               callID,
 					ToolCallName:             name,
 					ThoughtSignature:         sig,
-					ThoughtSignatureProvider: "google",
+					ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
 					Model:                    model,
 				})
 				events = append(events, canonical.CanonicalEvent{
@@ -865,7 +875,7 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 				if p.Thought {
 					parts = append(parts, canonical.ContentPart{
 						Type: canonical.PartThinking, Thinking: p.Text,
-						ThoughtSignature: p.ThoughtSignature, ThoughtSignatureProvider: "google",
+						ThoughtSignature: p.ThoughtSignature, ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
 					})
 				} else {
 					parts = append(parts, canonical.ContentPart{Type: canonical.PartText, Text: p.Text})
@@ -901,7 +911,7 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 					ToolCallName:             p.FunctionCall.Name,
 					ToolCallArgs:             string(argsJSON),
 					ThoughtSignature:         p.ThoughtSignature,
-					ThoughtSignatureProvider: "google",
+					ThoughtSignatureProvider: canonical.SignatureProviderGoogle,
 				})
 			}
 		}
@@ -927,7 +937,7 @@ func ToGoogleResponse(resp *canonical.CanonicalResponse) (*GenerateContentRespon
 		case canonical.PartThinking:
 			if p.Thinking != "" {
 				sig := p.ThoughtSignature
-				if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != "google" {
+				if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != canonical.SignatureProviderGoogle {
 					sig = ""
 				}
 				parts = append(parts, Part{Text: p.Thinking, Thought: true, ThoughtSignature: sig})
@@ -942,17 +952,7 @@ func ToGoogleResponse(resp *canonical.CanonicalResponse) (*GenerateContentRespon
 			if args == nil {
 				args = make(map[string]any)
 			}
-			sig := p.ThoughtSignature
-			switch p.ThoughtSignatureProvider {
-			case "google":
-				// Preserve an intentional omission on later parallel calls.
-			case "":
-				if sig == "" {
-					sig = "skip_thought_signature_validator"
-				}
-			default:
-				sig = "skip_thought_signature_validator"
-			}
+			sig := ResolveThoughtSignature(p.ThoughtSignature, p.ThoughtSignatureProvider, "", p.ToolCallID)
 			parts = append(parts, Part{
 				FunctionCall: &FunctionCall{
 					ID:   p.ToolCallID,
