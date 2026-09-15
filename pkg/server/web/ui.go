@@ -277,6 +277,70 @@ func (d *DashboardHandler) HandleAPIMetricsHourly(w http.ResponseWriter, r *http
 	})
 }
 
+func (d *DashboardHandler) HandleAPIMetricsSpeed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if d.metrics == nil {
+		_ = json.NewEncoder(w).Encode(&metrics.SpeedMetricsResponse{
+			Granularity: "hour",
+			Models:      []metrics.ModelOverallSpeed{},
+			Buckets:     []metrics.SpeedBucket{},
+		})
+		return
+	}
+
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+	granularity := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("granularity")))
+	provider := r.URL.Query().Get("provider")
+
+	now := time.Now().UTC()
+	var start, end time.Time
+
+	if endStr != "" {
+		if t, err := time.Parse(time.RFC3339, endStr); err == nil {
+			end = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", endStr); err == nil {
+			end = t
+		} else if t, err := time.Parse("2006-01-02 15:04", endStr); err == nil {
+			end = t
+		} else if t, err := time.Parse("2006-01-02", endStr); err == nil {
+			end = t.Add(24*time.Hour - time.Nanosecond)
+		} else {
+			end = now
+		}
+	} else {
+		end = now
+	}
+
+	if startStr != "" {
+		if t, err := time.Parse(time.RFC3339, startStr); err == nil {
+			start = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", startStr); err == nil {
+			start = t
+		} else if t, err := time.Parse("2006-01-02 15:04", startStr); err == nil {
+			start = t
+		} else if t, err := time.Parse("2006-01-02", startStr); err == nil {
+			start = t
+		} else {
+			start = end.Add(-24 * time.Hour)
+		}
+	} else {
+		if granularity == "day" {
+			start = end.AddDate(0, 0, -6).Truncate(24 * time.Hour)
+		} else {
+			start = end.Add(-24 * time.Hour)
+		}
+	}
+
+	res, err := d.metrics.GetModelSpeedMetrics(start, end, granularity, provider)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(res)
+}
+
 const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -401,6 +465,10 @@ const dashboardHTML = `<!DOCTYPE html>
     .bar-group:hover rect { filter: brightness(1.2); }
     .axis-label { fill: #8b949e; font-size: 11px; font-family: -apple-system, sans-serif; }
     .grid-line { stroke: #21262d; stroke-dasharray: 2, 2; }
+    .speed-legend-item { display: inline-flex; align-items: center; gap: 0.45rem; background: #161b22; padding: 0.28rem 0.65rem; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; user-select: none; font-size: 0.78rem; }
+    .speed-legend-item:hover { border-color: #58a6ff; }
+    .speed-legend-item.muted { opacity: 0.38; filter: grayscale(80%); text-decoration: line-through; }
+    .sparkline { overflow: visible; display: inline-block; vertical-align: middle; }
   </style>
 </head>
 <body>
@@ -527,6 +595,79 @@ const dashboardHTML = `<!DOCTYPE html>
 
       <!-- Chart Model Legend -->
       <div class="chart-legend" id="chartLegend"></div>
+    </div>
+
+    <!-- Model Output Speed Comparison Card -->
+    <div class="card" style="margin-bottom: 1.75rem;">
+      <div class="analytics-header">
+        <div>
+          <h2 style="margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem;">
+            ⚡ Model Output Speed Comparison
+            <span class="badge" style="color: #7ee787; border-color: #238636;">tok/s Throughput</span>
+          </h2>
+          <div style="font-size: 0.78rem; color: #8b949e;">
+            Weighted average token output speed across sessions. Compare models across Minute, Hour, or Day resolutions. Click model tags to toggle lines.
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+          <button class="btn-sm" onclick="loadSpeedMetrics()">↻ Refresh Speed</button>
+        </div>
+      </div>
+
+      <!-- Controls Bar: Range Presets, Granularity, Custom Dates, Provider Filter -->
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; background: #11151c; padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 1rem;">
+        <div class="filter-group">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">RANGE:</span>
+          <button class="range-btn active" id="btn-speed-range-24h" onclick="selectSpeedRange('24h')">24h</button>
+          <button class="range-btn" id="btn-speed-range-7d" onclick="selectSpeedRange('7d')">7 Days</button>
+          <button class="range-btn" id="btn-speed-range-14d" onclick="selectSpeedRange('14d')">14 Days</button>
+          <button class="range-btn" id="btn-speed-range-30d" onclick="selectSpeedRange('30d')">30 Days</button>
+        </div>
+
+        <div class="filter-group">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">GRANULARITY:</span>
+          <button class="range-btn" id="btn-speed-gran-minute" onclick="selectSpeedGranularity('minute')">Minute</button>
+          <button class="range-btn active" id="btn-speed-gran-hour" onclick="selectSpeedGranularity('hour')">Hour</button>
+          <button class="range-btn" id="btn-speed-gran-day" onclick="selectSpeedGranularity('day')">Day</button>
+        </div>
+
+        <div class="filter-group" style="flex-wrap: nowrap;">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">CUSTOM:</span>
+          <input type="date" id="speedCustomStartDate" class="date-input">
+          <span style="color: #8b949e; font-size: 0.8rem;">to</span>
+          <input type="date" id="speedCustomEndDate" class="date-input">
+          <button class="btn-sm" onclick="applySpeedCustomRange()">Apply</button>
+        </div>
+
+        <div class="filter-group" style="flex-wrap: nowrap;">
+          <span style="font-size: 0.78rem; color: #8b949e; font-weight: 600;">PROVIDER:</span>
+          <select id="speedProviderSelect" class="select-input" onchange="onSpeedProviderChange()">
+            <option value="">All Providers</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- View Title & Top Model Banner -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; font-size: 0.85rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div id="speedViewTitle" style="font-weight: 600; color: #f0f6fc;">
+          ⚡ Speed Comparison: <strong>Last 24 Hours</strong> (Hourly)
+        </div>
+        <div id="speedTopModelBanner" style="color: #8b949e; font-size: 0.8rem;"></div>
+      </div>
+
+      <!-- Model Speed KPI Badges / Toggleable Legend -->
+      <div class="chart-legend" id="speedModelBadges" style="margin-top: 0; margin-bottom: 0.75rem; padding-top: 0; border-top: none;"></div>
+
+      <!-- Chart Container & Tooltip -->
+      <div class="chart-container" id="speedChartWrapper">
+        <div id="speedChartTooltip" class="chart-tooltip"></div>
+        <div id="speedChartEmpty" style="display: none; margin: auto; text-align: center; color: #8b949e; padding: 2.5rem 1rem;">
+          <div style="font-size: 1.8rem; margin-bottom: 0.4rem;">⚡</div>
+          <div style="font-weight: 600; color: #c9d1d9;">No speed metrics recorded for this time range</div>
+          <div style="font-size: 0.8rem; margin-top: 0.2rem;">Requests must generate tokens and run for at least 50ms to measure throughput.</div>
+        </div>
+        <div id="speedChartSvgWrapper" style="width: 100%; height: 320px; position: relative;"></div>
+      </div>
     </div>
 
     <!-- Active Sessions & Token Usage Card -->
@@ -696,6 +837,51 @@ const dashboardHTML = `<!DOCTYPE html>
     function formatTokensPerSecond(value) {
       const rate = Number(value || 0);
       return rate > 0 ? rate.toFixed(1) + ' tok/s' : '—';
+    }
+
+    function renderSpeedSparkline(recentRequests) {
+      if (!recentRequests || recentRequests.length < 2) return '';
+
+      // Chronological order (oldest to newest)
+      const reqs = recentRequests.slice().reverse();
+      const points = [];
+      for (const r of reqs) {
+        if (r.status !== 'success' || !(r.output_tokens > 0)) continue;
+        const dur = (r.generation_duration_ms >= 50) ? r.generation_duration_ms : ((r.duration_ms >= 50) ? r.duration_ms : 0);
+        if (dur <= 0) continue;
+        const spd = r.tokens_per_second > 0 ? r.tokens_per_second : (r.output_tokens * 1000.0 / dur);
+        if (spd > 0) points.push(Math.round(spd * 10) / 10);
+      }
+
+      if (points.length < 2) return '';
+
+      const minVal = Math.min(...points);
+      const maxVal = Math.max(...points);
+      const latestVal = points[points.length - 1];
+      const avgVal = Math.round((points.reduce((a, b) => a + b, 0) / points.length) * 10) / 10;
+
+      const w = 48;
+      const h = 16;
+      const pad = 2;
+      const plotH = h - pad * 2;
+      const range = (maxVal - minVal) || 1;
+
+      const coords = points.map((val, idx) => {
+        const x = pad + (idx / (points.length - 1)) * (w - pad * 2);
+        const y = pad + plotH - ((val - minVal) / range) * plotH;
+        return (Math.round(x * 10) / 10) + ',' + (Math.round(y * 10) / 10);
+      });
+
+      const lastX = w - pad;
+      const lastY = pad + plotH - ((latestVal - minVal) / range) * plotH;
+
+      const tooltipText = 'Speed trend: ' + points[0] + ' → ' + latestVal + ' tok/s (min: ' + minVal + ', max: ' + maxVal + ', avg: ' + avgVal + ')';
+
+      return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" class="sparkline" style="display:inline-block; vertical-align:middle; flex-shrink:0;">' +
+        '<title>' + escapeHtml(tooltipText) + '</title>' +
+        '<polyline points="' + coords.join(' ') + '" fill="none" stroke="#7ee787" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />' +
+        '<circle cx="' + (Math.round(lastX * 10) / 10) + '" cy="' + (Math.round(lastY * 10) / 10) + '" r="2" fill="#7ee787" />' +
+        '</svg>';
     }
 
     function formatRelativeTime(dateStr) {
@@ -1021,6 +1207,8 @@ const dashboardHTML = `<!DOCTYPE html>
           const reqCount = s.request_count || 0;
           const isExpanded = openDetails.has(s.id);
 
+          const sparklineHtml = renderSpeedSparkline(s.recent_requests);
+
           const tr = document.createElement('tr');
           tr.innerHTML = '<td><code>' + escapeHtml(s.id) + '</code></td>' +
             '<td><span class="pill ' + clientPill + '">' + escapeHtml(s.client || 'Client') + '</span></td>' +
@@ -1029,7 +1217,7 @@ const dashboardHTML = `<!DOCTYPE html>
             '<td title="' + (s.context_tokens_estimated ? 'Estimated input of the latest request' : 'Provider-reported input of the latest request, including cache') + '"><strong class="token-in">' + (s.context_tokens_estimated ? '~' : '') + formatNumber(s.context_tokens) + '</strong></td>' +
             '<td><span class="token-in">' + formatNumber(s.input_tokens) + '</span></td>' +
             '<td><span class="token-out">' + formatNumber(s.output_tokens) + '</span></td>' +
-            '<td><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(s.tokens_per_second) + '</strong></td>' +
+            '<td><div style="display: inline-flex; align-items: center; gap: 6px;"><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(s.tokens_per_second) + '</strong>' + sparklineHtml + '</div></td>' +
             '<td><span class="token-total">' + formatNumber(s.total_tokens) + '</span></td>' +
             '<td title="' + escapeHtml(s.last_active) + '">' + formatRelativeTime(s.last_active) + '</td>' +
             '<td><div style="display: flex; gap: 0.35rem; align-items: center;">' +
@@ -1805,6 +1993,17 @@ const dashboardHTML = `<!DOCTYPE html>
           if (selectedMetricsProvider) pSelect.value = selectedMetricsProvider;
         }
 
+        const spSelect = document.getElementById('speedProviderSelect');
+        if (spSelect && spSelect.children.length <= 1 && sumRes && sumRes.available_providers) {
+          sumRes.available_providers.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p.toUpperCase();
+            spSelect.appendChild(opt);
+          });
+          if (speedSelectedProvider) spSelect.value = speedSelectedProvider;
+        }
+
         cachedDailyData = dailyRes.days || [];
         renderAnalytics(cachedDailyData, sumRes, false);
       } catch (err) {
@@ -1969,6 +2168,7 @@ const dashboardHTML = `<!DOCTYPE html>
       chartResizeTimer = setTimeout(function() {
         const last = window.__lastAnalytics;
         if (last) renderAnalytics(last.buckets, last.summary, last.isHourly, last.activeDate);
+        if (cachedSpeedData) renderSpeedChart(cachedSpeedData);
       }, 150);
     });
 
@@ -2041,10 +2241,341 @@ const dashboardHTML = `<!DOCTYPE html>
       if (tooltip) tooltip.style.display = 'none';
     }
 
+    // --- Model Speed Analytics & Comparison Chart ---
+    let speedRangePreset = '24h';
+    let speedGranularity = 'hour';
+    let speedCustomStart = '';
+    let speedCustomEnd = '';
+    let speedSelectedProvider = '';
+    let hiddenSpeedModels = new Set();
+    let cachedSpeedData = null;
+
+    function selectSpeedRange(preset) {
+      speedRangePreset = preset;
+      ['24h', '7d', '14d', '30d'].forEach(p => {
+        const btn = document.getElementById('btn-speed-range-' + p);
+        if (btn) btn.classList.toggle('active', p === preset);
+      });
+
+      const range = getDateRangeForPreset(preset);
+      speedCustomStart = range.start;
+      speedCustomEnd = range.end;
+      const sInput = document.getElementById('speedCustomStartDate');
+      const eInput = document.getElementById('speedCustomEndDate');
+      if (sInput) sInput.value = range.start;
+      if (eInput) eInput.value = range.end;
+
+      if ((preset === '7d' || preset === '14d' || preset === '30d') && speedGranularity === 'minute') {
+        selectSpeedGranularity('hour', false);
+      }
+
+      loadSpeedMetrics();
+    }
+
+    function selectSpeedGranularity(gran, reload = true) {
+      speedGranularity = gran;
+      ['minute', 'hour', 'day'].forEach(g => {
+        const btn = document.getElementById('btn-speed-gran-' + g);
+        if (btn) btn.classList.toggle('active', g === gran);
+      });
+
+      if (gran === 'minute' && speedRangePreset !== '24h') {
+        selectSpeedRange('24h');
+        return;
+      }
+
+      if (reload) loadSpeedMetrics();
+    }
+
+    function applySpeedCustomRange() {
+      const s = document.getElementById('speedCustomStartDate').value;
+      const e = document.getElementById('speedCustomEndDate').value;
+      if (!s || !e) return;
+      speedCustomStart = s;
+      speedCustomEnd = e;
+      speedRangePreset = 'custom';
+
+      ['24h', '7d', '14d', '30d'].forEach(p => {
+        const btn = document.getElementById('btn-speed-range-' + p);
+        if (btn) btn.classList.remove('active');
+      });
+
+      loadSpeedMetrics();
+    }
+
+    function onSpeedProviderChange() {
+      speedSelectedProvider = document.getElementById('speedProviderSelect').value;
+      loadSpeedMetrics();
+    }
+
+    function toggleSpeedModel(modelName) {
+      if (hiddenSpeedModels.has(modelName)) {
+        hiddenSpeedModels.delete(modelName);
+      } else {
+        hiddenSpeedModels.add(modelName);
+      }
+      if (cachedSpeedData) {
+        renderSpeedChart(cachedSpeedData);
+      }
+    }
+
+    async function loadSpeedMetrics() {
+      if (!speedCustomStart || !speedCustomEnd) {
+        const r = getDateRangeForPreset(speedRangePreset);
+        speedCustomStart = r.start;
+        speedCustomEnd = r.end;
+        const sInput = document.getElementById('speedCustomStartDate');
+        const eInput = document.getElementById('speedCustomEndDate');
+        if (sInput) sInput.value = r.start;
+        if (eInput) eInput.value = r.end;
+      }
+
+      const gran = speedGranularity || 'hour';
+      const granTitle = gran.charAt(0).toUpperCase() + gran.slice(1);
+      const titleEl = document.getElementById('speedViewTitle');
+      if (titleEl) {
+        titleEl.innerHTML = '⚡ Speed Comparison: <strong>' + escapeHtml(speedCustomStart) + '</strong> to <strong>' + escapeHtml(speedCustomEnd) + '</strong> (' + granTitle + ' View)';
+      }
+
+      try {
+        const pParam = speedSelectedProvider ? ('&provider=' + encodeURIComponent(speedSelectedProvider)) : '';
+        const url = '/api/metrics/speed?start=' + encodeURIComponent(speedCustomStart) + '&end=' + encodeURIComponent(speedCustomEnd) + '&granularity=' + encodeURIComponent(gran) + pParam;
+        const res = await fetch(url).then(r => r.json());
+        cachedSpeedData = res;
+
+        renderSpeedChart(res);
+      } catch (err) {
+        console.error('Failed to load speed metrics:', err);
+      }
+    }
+
+    function renderSpeedChart(data) {
+      const emptyEl = document.getElementById('speedChartEmpty');
+      const svgWrapper = document.getElementById('speedChartSvgWrapper');
+      const badgesEl = document.getElementById('speedModelBadges');
+      const topModelBanner = document.getElementById('speedTopModelBanner');
+
+      if (!data || !data.models || data.models.length === 0 || !data.buckets || data.buckets.length === 0) {
+        emptyEl.style.display = 'block';
+        svgWrapper.innerHTML = '';
+        badgesEl.innerHTML = '';
+        if (topModelBanner) topModelBanner.textContent = '';
+        return;
+      }
+      emptyEl.style.display = 'none';
+
+      // 1. Top Model Banner
+      const fastest = data.models[0];
+      if (topModelBanner && fastest) {
+        topModelBanner.innerHTML = 'Fastest: <strong>' + escapeHtml(fastest.model) + '</strong> (' +
+          '<strong style="color: #7ee787;">' + fastest.avg_tokens_per_second.toFixed(1) + ' tok/s</strong> across ' +
+          formatNumber(fastest.total_requests) + ' reqs)';
+      }
+
+      // 2. Render Model Badges / Toggleable Legend
+      let badgesHtml = '';
+      data.models.forEach(m => {
+        const isHidden = hiddenSpeedModels.has(m.model);
+        const color = getModelColor(m.model);
+        const mutedClass = isHidden ? ' muted' : '';
+        const pBadge = m.provider ? ('<span style="color: #8b949e; font-size: 0.72rem;">[' + escapeHtml(m.provider) + ']</span>') : '';
+        badgesHtml += '<div class="speed-legend-item' + mutedClass + '" onclick="toggleSpeedModel(\'' + escapeHtml(m.model) + '\')" title="Click to toggle ' + escapeHtml(m.model) + ' in chart">' +
+          '<span class="legend-color" style="background: ' + color + ';"></span>' +
+          '<span>' + escapeHtml(m.model) + '</span>' + pBadge +
+          '<span class="badge" style="color: #7ee787; border-color: #238636; margin-left: 0.35rem; font-weight: 600;">' + m.avg_tokens_per_second.toFixed(1) + ' tok/s</span>' +
+          '<span style="color: #8b949e; font-size: 0.72rem; margin-left: 0.2rem;">(' + m.total_requests + ' reqs)</span>' +
+          '</div>';
+      });
+      badgesEl.innerHTML = badgesHtml;
+
+      // 3. Compute SVG Dimensions & Scales
+      const vbWidth = Math.max(360, Math.round(svgWrapper.clientWidth) || 1000);
+      const vbHeight = Math.max(200, Math.round(svgWrapper.clientHeight) || 320);
+      const marginLeft = 70;
+      const marginRight = 25;
+      const marginTop = 20;
+      const marginBottom = 40;
+      const plotWidth = vbWidth - marginLeft - marginRight;
+      const plotHeight = vbHeight - marginTop - marginBottom;
+      const baselineY = marginTop + plotHeight;
+
+      // Filter active (visible) models
+      const activeModels = data.models.filter(m => !hiddenSpeedModels.has(m.model));
+
+      // Calculate max speed across all buckets for visible models
+      let maxSpeed = 10;
+      data.buckets.forEach(b => {
+        (b.models || []).forEach(mPoint => {
+          if (!hiddenSpeedModels.has(mPoint.model) && mPoint.tokens_per_second > maxSpeed) {
+            maxSpeed = mPoint.tokens_per_second;
+          }
+        });
+      });
+      maxSpeed = Math.ceil((maxSpeed * 1.15) / 10) * 10;
+      if (maxSpeed <= 0) maxSpeed = 50;
+
+      window.__speedData = { data: data, marginLeft: marginLeft, plotWidth: plotWidth, plotHeight: plotHeight, marginTop: marginTop, baselineY: baselineY, maxSpeed: maxSpeed };
+
+      let svg = '<svg viewBox="0 0 ' + vbWidth + ' ' + vbHeight + '" preserveAspectRatio="none" style="width: 100%; height: 100%; overflow: visible;">';
+
+      // 4. Gridlines & Y-Axis Labels
+      const gridTicks = [0, 0.25, 0.5, 0.75, 1.0];
+      gridTicks.forEach(tick => {
+        const y = Math.round(baselineY - tick * plotHeight);
+        const val = Math.round(tick * maxSpeed);
+        svg += '<line x1="' + marginLeft + '" y1="' + y + '" x2="' + (marginLeft + plotWidth) + '" y2="' + y + '" class="grid-line" />';
+        svg += '<text x="' + (marginLeft - 8) + '" y="' + (y + 4) + '" text-anchor="end" class="axis-label">' + val + ' tok/s</text>';
+      });
+
+      const n = data.buckets.length;
+      const slotWidth = plotWidth / n;
+
+      // 5. Draw Lines and Points for each active model
+      activeModels.forEach(m => {
+        const color = getModelColor(m.model);
+        const points = [];
+
+        data.buckets.forEach((b, bIdx) => {
+          const mPoint = (b.models || []).find(p => p.model === m.model);
+          if (mPoint && mPoint.tokens_per_second > 0) {
+            const px = Math.round((marginLeft + (bIdx + 0.5) * slotWidth) * 10) / 10;
+            const py = Math.round((baselineY - (mPoint.tokens_per_second / maxSpeed) * plotHeight) * 10) / 10;
+            points.push({ x: px, y: py, tps: mPoint.tokens_per_second, reqs: mPoint.requests, tokens: mPoint.output_tokens });
+          }
+        });
+
+        if (points.length >= 2) {
+          const polyCoords = points.map(pt => pt.x + ',' + pt.y).join(' ');
+          svg += '<polyline points="' + polyCoords + '" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" />';
+        }
+
+        // Draw circles at data points
+        points.forEach(pt => {
+          svg += '<circle cx="' + pt.x + '" cy="' + pt.y + '" r="3.5" fill="' + color + '" stroke="#0c1017" stroke-width="1.5" />';
+        });
+      });
+
+      // 6. X-Axis Labels & Hover Interactivity
+      data.buckets.forEach((b, idx) => {
+        const slotX = marginLeft + idx * slotWidth;
+        const centerX = slotX + slotWidth / 2;
+
+        let labelText = b.bucket;
+        if (data.granularity === 'minute') {
+          const parts = b.bucket.split(' ');
+          labelText = parts.length === 2 ? parts[1] : b.bucket;
+        } else if (data.granularity === 'hour') {
+          const parts = b.bucket.split(' ');
+          labelText = parts.length === 2 ? parts[1] : b.bucket;
+        } else {
+          const parts = b.bucket.split('-');
+          labelText = parts.length === 3 ? (parts[1] + '/' + parts[2]) : b.bucket;
+        }
+
+        let showLabel = true;
+        if (n > 12) {
+          const step = Math.ceil(n / 10);
+          if (idx % step !== 0 && idx !== n - 1) showLabel = false;
+        }
+
+        if (showLabel) {
+          svg += '<text x="' + Math.round(centerX) + '" y="' + (baselineY + 18) + '" text-anchor="middle" class="axis-label">' + escapeHtml(labelText) + '</text>';
+        }
+
+        svg += '<rect x="' + Math.round(slotX) + '" y="' + marginTop + '" width="' + Math.max(1, Math.round(slotWidth)) + '" height="' + (plotHeight + marginBottom) + '" fill="transparent" style="cursor: crosshair;" onmouseenter="showSpeedTooltip(event, ' + idx + ')" onmousemove="moveSpeedTooltip(event)" onmouseleave="hideSpeedTooltip()" />';
+      });
+
+      // Crosshair placeholder
+      svg += '<line id="speedChartCrosshair" x1="0" y1="' + marginTop + '" x2="0" y2="' + baselineY + '" stroke="#58a6ff" stroke-width="1" stroke-dasharray="3,3" opacity="0" pointer-events="none" />';
+
+      svg += '</svg>';
+      svgWrapper.innerHTML = svg;
+    }
+
+    function showSpeedTooltip(event, bucketIdx) {
+      const tooltip = document.getElementById('speedChartTooltip');
+      const crosshair = document.getElementById('speedChartCrosshair');
+      const store = window.__speedData;
+      if (!tooltip || !store || !store.data) return;
+
+      const buckets = store.data.buckets;
+      if (!buckets || !buckets[bucketIdx]) return;
+      const b = buckets[bucketIdx];
+
+      if (crosshair) {
+        const slotWidth = store.plotWidth / buckets.length;
+        const cx = Math.round(store.marginLeft + (bucketIdx + 0.5) * slotWidth);
+        crosshair.setAttribute('x1', cx);
+        crosshair.setAttribute('x2', cx);
+        crosshair.style.opacity = '0.75';
+      }
+
+      let title = b.bucket;
+      if (store.data.granularity === 'minute') {
+        title = 'Time ' + b.bucket + ' UTC';
+      } else if (store.data.granularity === 'hour') {
+        title = 'Hour ' + b.bucket + ' UTC';
+      } else {
+        title = 'Date ' + b.bucket;
+      }
+
+      let modelsHtml = '';
+      const visibleModels = (b.models || []).filter(m => !hiddenSpeedModels.has(m.model));
+      if (visibleModels.length > 0) {
+        modelsHtml = '<div style="margin-top: 0.5rem; border-top: 1px dashed #30363d; padding-top: 0.4rem;">';
+        visibleModels.forEach(m => {
+          const color = getModelColor(m.model);
+          modelsHtml += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem; gap: 0.5rem;">' +
+            '<div style="display: flex; align-items: center; gap: 0.35rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' +
+              '<span class="legend-color" style="background: ' + color + '; width: 8px; height: 8px;"></span>' +
+              '<span>' + escapeHtml(m.model) + '</span>' +
+            '</div>' +
+            '<div style="font-family: monospace; font-weight: 600;">' +
+              '<span style="color: #7ee787;">' + m.tokens_per_second.toFixed(1) + ' tok/s</span> ' +
+              '<span style="color: #8b949e; font-size: 0.72rem;">(' + m.requests + ' reqs, ' + formatShortNumber(m.output_tokens) + ' tok)</span>' +
+            '</div>' +
+          '</div>';
+        });
+        modelsHtml += '</div>';
+      } else {
+        modelsHtml = '<div style="color: #8b949e; font-size: 0.75rem; margin-top: 0.3rem;">No active models in this interval.</div>';
+      }
+
+      tooltip.innerHTML = '<h4><span>' + escapeHtml(title) + '</span><span class="badge" style="color: #7ee787; border-color: #238636;">Throughput</span></h4>' +
+        modelsHtml;
+
+      tooltip.style.display = 'block';
+      moveSpeedTooltip(event);
+    }
+
+    function moveSpeedTooltip(event) {
+      const tooltip = document.getElementById('speedChartTooltip');
+      const chartWrapper = document.getElementById('speedChartWrapper');
+      if (!tooltip || !chartWrapper) return;
+
+      const rect = chartWrapper.getBoundingClientRect();
+      const x = event.clientX - rect.left + 15;
+      const y = event.clientY - rect.top + 10;
+
+      const tipWidth = tooltip.offsetWidth || 260;
+      const finalX = (x + tipWidth > rect.width) ? (x - tipWidth - 30) : x;
+
+      tooltip.style.left = Math.max(10, finalX) + 'px';
+      tooltip.style.top = Math.max(10, y) + 'px';
+    }
+
+    function hideSpeedTooltip() {
+      const tooltip = document.getElementById('speedChartTooltip');
+      if (tooltip) tooltip.style.display = 'none';
+      const crosshair = document.getElementById('speedChartCrosshair');
+      if (crosshair) crosshair.style.opacity = '0';
+    }
+
     // Initial load
     loadData();
     loadSessions();
     loadAnalytics();
+    loadSpeedMetrics();
 
     // Auto-refresh sessions every 4 seconds
     setInterval(loadSessions, 4000);

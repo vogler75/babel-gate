@@ -3,6 +3,7 @@ package metrics
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,6 +70,45 @@ type MetricsSummary struct {
 	AvailableModels    []string         `json:"available_models"`
 	StartDate          string           `json:"start_date"`
 	EndDate            string           `json:"end_date"`
+}
+
+// ModelSpeedPoint captures throughput for a specific model within a time bucket.
+type ModelSpeedPoint struct {
+	Model                string  `json:"model"`
+	Provider             string  `json:"provider"`
+	Requests             int64   `json:"requests"`
+	OutputTokens         int64   `json:"output_tokens"`
+	GenerationDurationMs int64   `json:"generation_duration_ms"`
+	TokensPerSecond      float64 `json:"tokens_per_second"`
+}
+
+// SpeedBucket contains model throughput metrics for a single time bucket (minute, hour, or day).
+type SpeedBucket struct {
+	Bucket    string            `json:"bucket"`    // Display key: "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:00", or "YYYY-MM-DD"
+	Timestamp string            `json:"timestamp"` // ISO8601 UTC
+	Models    []ModelSpeedPoint `json:"models"`    // Sorted by TokensPerSecond desc
+}
+
+// ModelOverallSpeed summarizes speed stats for a single model across the full selected range.
+type ModelOverallSpeed struct {
+	Model                string  `json:"model"`
+	Provider             string  `json:"provider"`
+	TotalRequests        int64   `json:"total_requests"`
+	TotalOutputTokens    int64   `json:"total_output_tokens"`
+	GenerationDurationMs int64   `json:"generation_duration_ms"`
+	AvgTokensPerSecond   float64 `json:"avg_tokens_per_second"`
+	MinTokensPerSecond   float64 `json:"min_tokens_per_second,omitempty"`
+	MaxTokensPerSecond   float64 `json:"max_tokens_per_second,omitempty"`
+}
+
+// SpeedMetricsResponse is the response payload for model speed analytics.
+type SpeedMetricsResponse struct {
+	Granularity string              `json:"granularity"` // "minute", "hour", "day"
+	StartDate   string              `json:"start_date"`
+	EndDate     string              `json:"end_date"`
+	Provider    string              `json:"provider,omitempty"`
+	Models      []ModelOverallSpeed `json:"models"`  // Ranked by AvgTokensPerSecond desc
+	Buckets     []SpeedBucket       `json:"buckets"` // Chronological order
 }
 
 // Store manages SQLite persistence for hourly metrics.
@@ -576,3 +616,174 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 
 	return summary, nil
 }
+
+// GetModelSpeedMetrics queries session_requests within [start, end] and calculates average token
+// output generation throughput (tok/s) grouped by model and time bucket (minute, hour, or day).
+func (s *Store) GetModelSpeedMetrics(start, end time.Time, granularity, providerFilter string) (*SpeedMetricsResponse, error) {
+	resp := &SpeedMetricsResponse{
+		Granularity: granularity,
+		Models:      []ModelOverallSpeed{},
+		Buckets:     []SpeedBucket{},
+		Provider:    providerFilter,
+	}
+
+	if s == nil || s.db == nil {
+		return resp, nil
+	}
+
+	// Normalize granularity
+	switch granularity {
+	case "minute":
+		// Safeguard: minute granularity clamped to at most 24 hours
+		if end.Sub(start) > 24*time.Hour {
+			start = end.Add(-24 * time.Hour)
+		}
+	case "day":
+		// OK
+	default:
+		granularity = "hour"
+	}
+	resp.Granularity = granularity
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startStr := start.UTC().Format(time.RFC3339)
+	endStr := end.UTC().Format(time.RFC3339)
+	resp.StartDate = startStr
+	resp.EndDate = endStr
+
+	var strftimeFmt string
+	switch granularity {
+	case "minute":
+		strftimeFmt = "%Y-%m-%d %H:%M"
+	case "day":
+		strftimeFmt = "%Y-%m-%d"
+	default: // hour
+		strftimeFmt = "%Y-%m-%d %H:00"
+	}
+
+	// 1. Query Overall Model Speeds across the entire time range
+	overallQuery := `
+	SELECT model, provider,
+	       COUNT(*) AS req_count,
+	       SUM(output_tokens) AS sum_tokens,
+	       SUM(generation_duration_ms) AS sum_dur,
+	       MIN(tokens_per_second) AS min_tps,
+	       MAX(tokens_per_second) AS max_tps
+	FROM session_requests
+	WHERE timestamp >= ? AND timestamp <= ?
+	  AND status = 'success'
+	  AND output_tokens > 0
+	  AND generation_duration_ms >= 50
+	`
+	overallArgs := []any{startStr, endStr}
+	if providerFilter != "" && providerFilter != "all" {
+		overallQuery += " AND provider = ?"
+		overallArgs = append(overallArgs, providerFilter)
+	}
+	overallQuery += " GROUP BY model, provider"
+
+	rows, err := s.db.Query(overallQuery, overallArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying overall speed metrics: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var o ModelOverallSpeed
+		var minTps, maxTps sql.NullFloat64
+		if err := rows.Scan(&o.Model, &o.Provider, &o.TotalRequests, &o.TotalOutputTokens, &o.GenerationDurationMs, &minTps, &maxTps); err != nil {
+			continue
+		}
+		if o.GenerationDurationMs > 0 {
+			o.AvgTokensPerSecond = math.Round((float64(o.TotalOutputTokens)*1000.0/float64(o.GenerationDurationMs))*10) / 10
+		}
+		if minTps.Valid {
+			o.MinTokensPerSecond = math.Round(minTps.Float64*10) / 10
+		}
+		if maxTps.Valid {
+			o.MaxTokensPerSecond = math.Round(maxTps.Float64*10) / 10
+		}
+		resp.Models = append(resp.Models, o)
+	}
+
+	// Sort models by AvgTokensPerSecond descending
+	sort.Slice(resp.Models, func(i, j int) bool {
+		return resp.Models[i].AvgTokensPerSecond > resp.Models[j].AvgTokensPerSecond
+	})
+
+	// 2. Query Time-Series Buckets
+	bucketQuery := `
+	SELECT strftime(?, timestamp) AS bucket_key,
+	       model, provider,
+	       COUNT(*) AS req_count,
+	       SUM(output_tokens) AS sum_tokens,
+	       SUM(generation_duration_ms) AS sum_dur
+	FROM session_requests
+	WHERE timestamp >= ? AND timestamp <= ?
+	  AND status = 'success'
+	  AND output_tokens > 0
+	  AND generation_duration_ms >= 50
+	`
+	bucketArgs := []any{strftimeFmt, startStr, endStr}
+	if providerFilter != "" && providerFilter != "all" {
+		bucketQuery += " AND provider = ?"
+		bucketArgs = append(bucketArgs, providerFilter)
+	}
+	bucketQuery += " GROUP BY bucket_key, model, provider ORDER BY bucket_key ASC, model ASC"
+
+	bRows, err := s.db.Query(bucketQuery, bucketArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying bucket speed metrics: %w", err)
+	}
+	defer bRows.Close()
+
+	bucketMap := make(map[string]*SpeedBucket)
+	bucketOrder := make([]string, 0)
+
+	for bRows.Next() {
+		var bucketKey, model, provider string
+		var reqCount, sumTokens, sumDur int64
+		if err := bRows.Scan(&bucketKey, &model, &provider, &reqCount, &sumTokens, &sumDur); err != nil {
+			continue
+		}
+
+		b, exists := bucketMap[bucketKey]
+		if !exists {
+			b = &SpeedBucket{
+				Bucket:    bucketKey,
+				Timestamp: bucketKey,
+				Models:    []ModelSpeedPoint{},
+			}
+			bucketMap[bucketKey] = b
+			bucketOrder = append(bucketOrder, bucketKey)
+		}
+
+		var tps float64
+		if sumDur > 0 {
+			tps = math.Round((float64(sumTokens)*1000.0/float64(sumDur))*10) / 10
+		}
+
+		b.Models = append(b.Models, ModelSpeedPoint{
+			Model:                model,
+			Provider:             provider,
+			Requests:             reqCount,
+			OutputTokens:         sumTokens,
+			GenerationDurationMs: sumDur,
+			TokensPerSecond:      tps,
+		})
+	}
+
+	for _, k := range bucketOrder {
+		b := bucketMap[k]
+		// Sort models in bucket by speed desc
+		sort.Slice(b.Models, func(i, j int) bool {
+			return b.Models[i].TokensPerSecond > b.Models[j].TokensPerSecond
+		})
+		resp.Buckets = append(resp.Buckets, *b)
+	}
+
+	return resp, nil
+}
+

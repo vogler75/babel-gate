@@ -154,6 +154,44 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 		t.Errorf("expected 120 tokens and 1 error in hour 16, got %+v", h16)
 	}
 
+	// 3b. Test /api/metrics/speed
+	sessID := "ui_speed_test_sess"
+	_ = store.SaveSession(&session.Session{
+		ID:         sessID,
+		Client:     "Claude Code",
+		CreatedAt:  testDate,
+		LastActive: testDate,
+	})
+	_ = store.SaveRequest(sessID, session.RequestRecord{
+		ID:                   "r_spd_1",
+		Timestamp:            testDate,
+		Provider:             "anthropic",
+		Model:                "anthropic/claude-3-7-sonnet",
+		OutputTokens:         200,
+		GenerationDurationMs: 1000,
+		TokensPerSecond:      200.0,
+		Status:               "success",
+	})
+	reqSpeed := httptest.NewRequest(http.MethodGet, "/api/metrics/speed?start=2026-09-08T00:00:00Z&end=2026-09-08T23:59:59Z&granularity=hour", nil)
+	wSpeed := httptest.NewRecorder()
+	handler.HandleAPIMetricsSpeed(wSpeed, reqSpeed)
+	if wSpeed.Code != http.StatusOK {
+		t.Fatalf("expected speed status 200, got %d", wSpeed.Code)
+	}
+	var speedResp metrics.SpeedMetricsResponse
+	if err := json.NewDecoder(wSpeed.Body).Decode(&speedResp); err != nil {
+		t.Fatalf("failed to decode speed json: %v", err)
+	}
+	if len(speedResp.Models) != 1 || speedResp.Models[0].Model != "anthropic/claude-3-7-sonnet" {
+		t.Fatalf("unexpected speed models: %+v", speedResp.Models)
+	}
+	if speedResp.Models[0].AvgTokensPerSecond != 200.0 {
+		t.Errorf("expected 200 tok/s, got %f", speedResp.Models[0].AvgTokensPerSecond)
+	}
+	if len(speedResp.Buckets) != 1 {
+		t.Errorf("expected 1 speed bucket, got %d", len(speedResp.Buckets))
+	}
+
 	// 4. Test Index HTML contains analytics elements
 	reqIndex := httptest.NewRequest(http.MethodGet, "/", nil)
 	wIndex := httptest.NewRecorder()
@@ -167,6 +205,18 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	}
 	if !contains(html, "chartSvgWrapper") {
 		t.Errorf("expected 'chartSvgWrapper' in dashboard HTML")
+	}
+	if !contains(html, "Model Output Speed Comparison") {
+		t.Errorf("expected 'Model Output Speed Comparison' in dashboard HTML")
+	}
+	if !contains(html, "speedChartSvgWrapper") {
+		t.Errorf("expected 'speedChartSvgWrapper' in dashboard HTML")
+	}
+	if !contains(html, "loadSpeedMetrics") {
+		t.Errorf("expected 'loadSpeedMetrics' in dashboard HTML")
+	}
+	if !contains(html, "renderSpeedSparkline") {
+		t.Errorf("expected 'renderSpeedSparkline' in dashboard HTML")
 	}
 	if !contains(html, "zoomIntoDay") {
 		t.Errorf("expected 'zoomIntoDay' function in dashboard HTML")

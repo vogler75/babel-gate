@@ -311,3 +311,144 @@ func TestStore_SessionPersistence(t *testing.T) {
 		t.Errorf("expected 0 sessions after delete, got %d", len(loadedAfterDelete))
 	}
 }
+
+func TestStore_GetModelSpeedMetrics(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "speed_metrics_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "metrics.db")
+	store, err := NewStore(dbPath, 90)
+	if err != nil {
+		t.Fatalf("failed to init store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	sessID := "sess_speed_test"
+
+	sess := &session.Session{
+		ID:         sessID,
+		Client:     "test",
+		CreatedAt:  now,
+		LastActive: now,
+	}
+	if err := store.SaveSession(sess); err != nil {
+		t.Fatalf("SaveSession failed: %v", err)
+	}
+
+	// Model 1 (Fast model): 400 tokens in 1000ms = 400 tok/s at 12:05
+	req1 := session.RequestRecord{
+		ID:                   "r1",
+		Timestamp:            now.Add(5 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-flash",
+		OutputTokens:         400,
+		GenerationDurationMs: 1000,
+		TokensPerSecond:      400.0,
+		Status:               "success",
+	}
+	// Model 2 (Slower model): 100 tokens in 1000ms = 100 tok/s at 12:05
+	req2 := session.RequestRecord{
+		ID:                   "r2",
+		Timestamp:            now.Add(5 * time.Minute),
+		Provider:             "anthropic",
+		Model:                "anthropic/claude-opus",
+		OutputTokens:         100,
+		GenerationDurationMs: 1000,
+		TokensPerSecond:      100.0,
+		Status:               "success",
+	}
+	// Model 2 (Slower model): 300 tokens in 1000ms = 300 tok/s at 12:10
+	// Model 2 weighted avg = (100 + 300)*1000 / (1000 + 1000) = 400/2 = 200 tok/s
+	req3 := session.RequestRecord{
+		ID:                   "r3",
+		Timestamp:            now.Add(10 * time.Minute),
+		Provider:             "anthropic",
+		Model:                "anthropic/claude-opus",
+		OutputTokens:         300,
+		GenerationDurationMs: 1000,
+		TokensPerSecond:      300.0,
+		Status:               "success",
+	}
+	// Anomaly 1: Error status -> should be ignored
+	reqErr := session.RequestRecord{
+		ID:                   "r_err",
+		Timestamp:            now.Add(6 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-flash",
+		OutputTokens:         500,
+		GenerationDurationMs: 500,
+		TokensPerSecond:      1000.0,
+		Status:               "error",
+	}
+	// Anomaly 2: GenerationDurationMs < 50ms -> should be ignored
+	reqMicro := session.RequestRecord{
+		ID:                   "r_micro",
+		Timestamp:            now.Add(7 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-flash",
+		OutputTokens:         200,
+		GenerationDurationMs: 2,
+		TokensPerSecond:      100000.0,
+		Status:               "success",
+	}
+	// Anomaly 3: OutputTokens <= 0 -> should be ignored
+	reqZero := session.RequestRecord{
+		ID:                   "r_zero",
+		Timestamp:            now.Add(8 * time.Minute),
+		Provider:             "google",
+		Model:                "google/gemini-flash",
+		OutputTokens:         0,
+		GenerationDurationMs: 500,
+		TokensPerSecond:      0.0,
+		Status:               "success",
+	}
+
+	for _, r := range []session.RequestRecord{req1, req2, req3, reqErr, reqMicro, reqZero} {
+		if err := store.SaveRequest(sessID, r); err != nil {
+			t.Fatalf("SaveRequest failed: %v", err)
+		}
+	}
+
+	// 1. Test Hour Granularity
+	resp, err := store.GetModelSpeedMetrics(now, now.Add(1*time.Hour), "hour", "")
+	if err != nil {
+		t.Fatalf("GetModelSpeedMetrics failed: %v", err)
+	}
+
+	if len(resp.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(resp.Models))
+	}
+	// Gemini flash (400 tok/s) should be first, Claude opus (200 tok/s) second
+	if resp.Models[0].Model != "google/gemini-flash" || resp.Models[0].AvgTokensPerSecond != 400.0 {
+		t.Errorf("expected top model google/gemini-flash at 400 tok/s, got %s at %f", resp.Models[0].Model, resp.Models[0].AvgTokensPerSecond)
+	}
+	if resp.Models[1].Model != "anthropic/claude-opus" || resp.Models[1].AvgTokensPerSecond != 200.0 {
+		t.Errorf("expected second model anthropic/claude-opus at 200 tok/s, got %s at %f", resp.Models[1].Model, resp.Models[1].AvgTokensPerSecond)
+	}
+
+	if len(resp.Buckets) != 1 {
+		t.Fatalf("expected 1 hour bucket, got %d", len(resp.Buckets))
+	}
+
+	// 2. Test Minute Granularity
+	respMin, err := store.GetModelSpeedMetrics(now, now.Add(1*time.Hour), "minute", "")
+	if err != nil {
+		t.Fatalf("GetModelSpeedMetrics minute failed: %v", err)
+	}
+	if len(respMin.Buckets) != 2 {
+		t.Fatalf("expected 2 minute buckets (12:05 and 12:10), got %d", len(respMin.Buckets))
+	}
+
+	// 3. Test Provider Filter
+	respFilter, err := store.GetModelSpeedMetrics(now, now.Add(1*time.Hour), "hour", "google")
+	if err != nil {
+		t.Fatalf("GetModelSpeedMetrics filtered failed: %v", err)
+	}
+	if len(respFilter.Models) != 1 || respFilter.Models[0].Provider != "google" {
+		t.Fatalf("expected 1 google model, got %+v", respFilter.Models)
+	}
+}
