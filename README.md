@@ -84,6 +84,16 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
 
 ## Architecture
 
+<p align="center">
+  <a href="docs/architecture.webp">
+    <img src="docs/architecture.webp" alt="BabelGate Architecture Overview" width="100%">
+  </a>
+</p>
+
+<p align="center">
+  <sub>🔍 <a href="docs/architecture.webp"><b>Open full-size Architecture Diagram (WebP)</b></a></sub>
+</p>
+
 ```
                        INBOUND CLIENTS & AGENTS
       ┌──────────────────────┬──────────────────────┬──────────────────────┐
