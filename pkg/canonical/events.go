@@ -27,13 +27,14 @@ type CanonicalEvent struct {
 	CandidateIndex int `json:"candidate_index,omitempty"`
 
 	// Content blocks
-	Index            int    `json:"index,omitempty"`
-	Text             string `json:"text,omitempty"`
-	Thinking         string `json:"thinking,omitempty"`
-	ToolCallID       string `json:"tool_call_id,omitempty"`
-	ToolCallName     string `json:"tool_call_name,omitempty"`
-	ToolCallArgs     string `json:"tool_call_args,omitempty"` // incremental delta for args
-	ThoughtSignature string `json:"thought_signature,omitempty"`
+	Index                    int    `json:"index,omitempty"`
+	Text                     string `json:"text,omitempty"`
+	Thinking                 string `json:"thinking,omitempty"`
+	ToolCallID               string `json:"tool_call_id,omitempty"`
+	ToolCallName             string `json:"tool_call_name,omitempty"`
+	ToolCallArgs             string `json:"tool_call_args,omitempty"` // incremental delta for args
+	ThoughtSignature         string `json:"thought_signature,omitempty"`
+	ThoughtSignatureProvider string `json:"thought_signature_provider,omitempty"`
 
 	// Completion status & usage
 	FinishReason string `json:"finish_reason,omitempty"` // "stop", "tool_calls", "length"

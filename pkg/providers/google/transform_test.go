@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
@@ -197,6 +198,7 @@ func TestGoogleListModelsSDCCatalog(t *testing.T) {
 
 func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 	fakeSig := "EpoGCpcGAXLI2nx9...encrypted_signature_bytes..."
+	const scope = "session-cache-test"
 
 	// 1. Google returns a response with a thought_signature on a functionCall
 	googleResp := &GenerateContentResponse{
@@ -219,7 +221,7 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 		},
 	}
 
-	canonResp, err := FromGoogleResponse(googleResp, "gemini-2.5-flash")
+	canonResp, err := fromGoogleResponse(googleResp, "gemini-2.5-flash", nil, scope)
 	if err != nil {
 		t.Fatalf("FromGoogleResponse failed: %v", err)
 	}
@@ -231,8 +233,8 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 	if part.Type != canonical.PartToolCall {
 		t.Fatalf("expected PartToolCall, got %s", part.Type)
 	}
-	if part.ToolCallID != "call_default_api_Bash_0" {
-		t.Errorf("expected sanitized ID 'call_default_api_Bash_0', got %q", part.ToolCallID)
+	if !strings.HasPrefix(part.ToolCallID, "call_") {
+		t.Errorf("expected generated call ID, got %q", part.ToolCallID)
 	}
 	if part.ThoughtSignature != fakeSig {
 		t.Errorf("expected ThoughtSignature %q, got %q", fakeSig, part.ThoughtSignature)
@@ -241,7 +243,8 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 	// 2. Next turn: Claude Code sends back history containing the assistant's tool_use
 	// (Claude Code does NOT send ThoughtSignature, only ToolCallID)
 	canonReq := &canonical.CanonicalRequest{
-		Model: "gemini-2.5-flash",
+		Model:     "gemini-2.5-flash",
+		SessionID: scope,
 		Messages: []canonical.Message{
 			{
 				Role: canonical.RoleUser,
@@ -254,7 +257,7 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 				Parts: []canonical.ContentPart{
 					{
 						Type:         canonical.PartToolCall,
-						ToolCallID:   "call_default_api_Bash_0",
+						ToolCallID:   part.ToolCallID,
 						ToolCallName: "default_api:Bash",
 						ToolCallArgs: `{"command":"git status"}`,
 						// ThoughtSignature is intentionally empty here to simulate Claude Code!
@@ -266,7 +269,7 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 				Parts: []canonical.ContentPart{
 					{
 						Type:              canonical.PartToolResult,
-						ToolResultID:      "call_default_api_Bash_0",
+						ToolResultID:      part.ToolCallID,
 						ToolResultContent: "On branch main\nnothing to commit",
 					},
 				},
@@ -292,8 +295,8 @@ func TestGoogleThoughtSignature_CacheAndRestore(t *testing.T) {
 		t.Fatalf("expected 1 part, got %d", len(modelTurn.Parts))
 	}
 	modelPart := modelTurn.Parts[0]
-	if modelPart.FunctionCall == nil || modelPart.FunctionCall.Name != "default_api:Bash" {
-		t.Errorf("expected FunctionCall 'default_api:Bash', got %+v", modelPart.FunctionCall)
+	if modelPart.FunctionCall == nil || googleReq.names.Original(modelPart.FunctionCall.Name) != "default_api:Bash" {
+		t.Errorf("expected reversibly normalized FunctionCall 'default_api:Bash', got %+v", modelPart.FunctionCall)
 	}
 	if modelPart.ThoughtSignature != fakeSig {
 		t.Errorf("expected restored ThoughtSignature %q, got %q", fakeSig, modelPart.ThoughtSignature)
@@ -518,7 +521,3 @@ func TestClaudeCodeScenario_ToolSequence(t *testing.T) {
 		t.Errorf("expected last part to be FunctionResponse, got %+v", last.Parts)
 	}
 }
-
-
-
-

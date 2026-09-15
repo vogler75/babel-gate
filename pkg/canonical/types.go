@@ -37,10 +37,11 @@ type ContentPart struct {
 	ImageURL       string `json:"image_url,omitempty"`
 
 	// For PartToolCall
-	ToolCallID       string `json:"tool_call_id,omitempty"`
-	ToolCallName     string `json:"tool_call_name,omitempty"`
-	ToolCallArgs     string `json:"tool_call_args,omitempty"` // JSON string
-	ThoughtSignature string `json:"thought_signature,omitempty"`
+	ToolCallID               string `json:"tool_call_id,omitempty"`
+	ToolCallName             string `json:"tool_call_name,omitempty"`
+	ToolCallArgs             string `json:"tool_call_args,omitempty"` // JSON string
+	ThoughtSignature         string `json:"thought_signature,omitempty"`
+	ThoughtSignatureProvider string `json:"thought_signature_provider,omitempty"`
 
 	// For PartToolResult
 	ToolResultID      string `json:"tool_result_id,omitempty"`
@@ -105,15 +106,29 @@ type ToolChoice struct {
 	Name string `json:"name,omitempty"`
 }
 
+// ThinkingConfig carries request-level reasoning controls across protocols.
+// Providers use the fields they support and leave the rest intact.
+type ThinkingConfig struct {
+	Type            string `json:"type,omitempty"` // enabled, disabled, or adaptive
+	BudgetTokens    *int   `json:"budget_tokens,omitempty"`
+	Level           string `json:"level,omitempty"`
+	IncludeThoughts *bool  `json:"include_thoughts,omitempty"`
+}
+
 // CanonicalRequest is the normalized request passed into the routing and provider layers.
 type CanonicalRequest struct {
 	ToolChoice *ToolChoice       `json:"tool_choice,omitempty"`
+	Thinking   *ThinkingConfig   `json:"thinking,omitempty"`
 	Model      string            `json:"model"`
 	Messages   []Message         `json:"messages"`
 	Tools      []ToolDeclaration `json:"tools,omitempty"`
 	Params     Parameters        `json:"params,omitempty"`
 	Stream     bool              `json:"stream,omitempty"`
 	AuthToken  string            `json:"auth_token,omitempty"`
+	// SessionID scopes provider-side state that cannot be represented by the
+	// client protocol (for example Gemini thought signatures). It is never sent
+	// to an upstream provider.
+	SessionID string `json:"-"`
 }
 
 // SystemPrompt extracts and concatenates any leading or internal system messages.
@@ -150,6 +165,10 @@ type Usage struct {
 	TotalTokens              int `json:"total_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// ReasoningTokens is provider-reported hidden/thinking output. Providers
+	// differ on whether CompletionTokens includes it, so TotalTokens remains
+	// authoritative for billed aggregate usage.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // CanonicalResponse is the normalized response returned by providers for non-streaming requests.

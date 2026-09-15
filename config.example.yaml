@@ -4,6 +4,8 @@ server:
   port: 8080
   # Optional: require an API key from incoming clients (Bearer token or x-api-key)
   # api_key: "router-secret-key"
+  # Maximum time allowed to read an incoming request. Streaming responses do
+  # not have an absolute write deadline.
   timeout_seconds: 120
   cors_origins:
     - "*"
@@ -26,6 +28,11 @@ providers:
     api_key: "${GEMINI_API_KEY}"
     # Optional: custom base URL
     # base_url: "https://generativelanguage.googleapis.com/v1beta"
+    # Google upstream timeout controls. Header and idle timeouts default to
+    # 30s and 120s; generation_timeout_seconds defaults to 0 (disabled).
+    response_header_timeout_seconds: 30
+    stream_idle_timeout_seconds: 120
+    generation_timeout_seconds: 0
     # Optional: list explicit models to expose
     # enabled_models:
     #   - gemini-2.5-pro

@@ -20,6 +20,10 @@ type MetricsRecorder interface {
 	Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error
 }
 
+type DetailedMetricsRecorder interface {
+	RecordDetailed(t time.Time, provider, model string, inTokens, outTokens, totalTokens, cachedInputTokens, reasoningTokens int, isError bool) error
+}
+
 // SessionStore defines an interface for persisting and restoring sessions across restarts.
 type SessionStore interface {
 	SaveSession(s *Session) error
@@ -42,6 +46,8 @@ type RequestRecord struct {
 	InputTokens          int       `json:"input_tokens"`
 	InputTokensEstimated bool      `json:"input_tokens_estimated,omitempty"`
 	OutputTokens         int       `json:"output_tokens"`
+	CachedInputTokens    int       `json:"cached_input_tokens,omitempty"`
+	ReasoningTokens      int       `json:"reasoning_tokens,omitempty"`
 	TotalTokens          int       `json:"total_tokens"`
 	TokensPerSecond      float64   `json:"tokens_per_second"`
 	Status               string    `json:"status"` // "success" or "error"
@@ -50,14 +56,16 @@ type RequestRecord struct {
 
 // ModelUsage tracks aggregate usage for a specific model within a session.
 type ModelUsage struct {
-	Model        string    `json:"model"`
-	RequestCount int       `json:"request_count"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	TotalTokens  int       `json:"total_tokens"`
-	PercentReq   float64   `json:"percent_req"` // Percentage of total session requests (0-100)
-	PercentTok   float64   `json:"percent_tok"` // Percentage of total session tokens (0-100)
-	LastUsed     time.Time `json:"last_used"`
+	Model             string    `json:"model"`
+	RequestCount      int       `json:"request_count"`
+	InputTokens       int       `json:"input_tokens"`
+	OutputTokens      int       `json:"output_tokens"`
+	CachedInputTokens int       `json:"cached_input_tokens,omitempty"`
+	ReasoningTokens   int       `json:"reasoning_tokens,omitempty"`
+	TotalTokens       int       `json:"total_tokens"`
+	PercentReq        float64   `json:"percent_req"` // Percentage of total session requests (0-100)
+	PercentTok        float64   `json:"percent_tok"` // Percentage of total session tokens (0-100)
+	LastUsed          time.Time `json:"last_used"`
 }
 
 // Session tracks an ongoing client conversation/session and its aggregated token usage.
@@ -74,6 +82,8 @@ type Session struct {
 	ContextTokensEstimated bool                   `json:"context_tokens_estimated,omitempty"`
 	InputTokens            int                    `json:"input_tokens"`
 	OutputTokens           int                    `json:"output_tokens"`
+	CachedInputTokens      int                    `json:"cached_input_tokens,omitempty"`
+	ReasoningTokens        int                    `json:"reasoning_tokens,omitempty"`
 	TotalTokens            int                    `json:"total_tokens"`
 	TokensPerSecond        float64                `json:"tokens_per_second"`
 	GenerationDurationMs   int64                  `json:"-"`
@@ -85,27 +95,32 @@ type Session struct {
 
 // Summary provides aggregate metrics across all tracked sessions.
 type Summary struct {
-	TotalSessions     int `json:"total_sessions"`
-	TotalRequests     int `json:"total_requests"`
-	TotalInputTokens  int `json:"total_input_tokens"`
-	TotalOutputTokens int `json:"total_output_tokens"`
-	TotalTokens       int `json:"total_tokens"`
+	TotalSessions          int `json:"total_sessions"`
+	TotalRequests          int `json:"total_requests"`
+	TotalInputTokens       int `json:"total_input_tokens"`
+	TotalOutputTokens      int `json:"total_output_tokens"`
+	TotalCachedInputTokens int `json:"total_cached_input_tokens"`
+	TotalReasoningTokens   int `json:"total_reasoning_tokens"`
+	TotalTokens            int `json:"total_tokens"`
 }
 
 // Manager manages thread-safe tracking of client sessions and token usage.
 type Manager struct {
-	mu              sync.RWMutex
-	sessions        map[string]*Session
-	order           []string // list of session IDs
-	idleTimeout     time.Duration
-	sessionTTL      time.Duration // auto-purge sessions older than this (e.g. 24h)
-	maxSessions     int           // max concurrent sessions to keep in memory (e.g. 200)
-	maxRequests     int           // max requests to keep per session
-	totalReqs       int
-	totalInTok      int
-	totalOutTok     int
-	metricsRecorder MetricsRecorder
-	sessionStore    SessionStore
+	mu                sync.RWMutex
+	sessions          map[string]*Session
+	order             []string // list of session IDs
+	idleTimeout       time.Duration
+	sessionTTL        time.Duration // auto-purge sessions older than this (e.g. 24h)
+	maxSessions       int           // max concurrent sessions to keep in memory (e.g. 200)
+	maxRequests       int           // max requests to keep per session
+	totalReqs         int
+	totalInTok        int
+	totalOutTok       int
+	totalTok          int
+	totalCachedTok    int
+	totalReasoningTok int
+	metricsRecorder   MetricsRecorder
+	sessionStore      SessionStore
 }
 
 // NewManager creates a new Session Manager with retention defaults.
@@ -149,6 +164,9 @@ func (m *Manager) SetSessionStore(store SessionStore) error {
 		m.totalReqs += s.RequestCount
 		m.totalInTok += s.InputTokens
 		m.totalOutTok += s.OutputTokens
+		m.totalTok += s.TotalTokens
+		m.totalCachedTok += s.CachedInputTokens
+		m.totalReasoningTok += s.ReasoningTokens
 	}
 	return nil
 }
@@ -298,7 +316,10 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		}
 	}
 
-	if m.metricsRecorder != nil {
+	if detailed, ok := m.metricsRecorder.(DetailedMetricsRecorder); ok {
+		isErr := rec.Status == "error"
+		_ = detailed.RecordDetailed(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, rec.CachedInputTokens, rec.ReasoningTokens, isErr)
+	} else if m.metricsRecorder != nil {
 		isErr := rec.Status == "error"
 		_ = m.metricsRecorder.Record(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, isErr)
 	}
@@ -314,6 +335,8 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	s.ContextTokensEstimated = rec.InputTokensEstimated
 	s.InputTokens += rec.InputTokens
 	s.OutputTokens += rec.OutputTokens
+	s.CachedInputTokens += rec.CachedInputTokens
+	s.ReasoningTokens += rec.ReasoningTokens
 	s.TotalTokens += rec.TotalTokens
 	if rec.OutputTokens > 0 && generationDurationMs > 0 {
 		s.GenerationDurationMs += generationDurationMs
@@ -336,6 +359,8 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		stat.RequestCount++
 		stat.InputTokens += rec.InputTokens
 		stat.OutputTokens += rec.OutputTokens
+		stat.CachedInputTokens += rec.CachedInputTokens
+		stat.ReasoningTokens += rec.ReasoningTokens
 		stat.TotalTokens += rec.TotalTokens
 		stat.LastUsed = rec.Timestamp
 
@@ -371,6 +396,9 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	m.totalReqs++
 	m.totalInTok += rec.InputTokens
 	m.totalOutTok += rec.OutputTokens
+	m.totalTok += rec.TotalTokens
+	m.totalCachedTok += rec.CachedInputTokens
+	m.totalReasoningTok += rec.ReasoningTokens
 
 	if m.sessionStore != nil {
 		_ = m.sessionStore.SaveRequest(sessionID, rec)
@@ -421,11 +449,13 @@ func (m *Manager) GetSummary() Summary {
 	defer m.mu.RUnlock()
 
 	return Summary{
-		TotalSessions:     len(m.sessions),
-		TotalRequests:     m.totalReqs,
-		TotalInputTokens:  m.totalInTok,
-		TotalOutputTokens: m.totalOutTok,
-		TotalTokens:       m.totalInTok + m.totalOutTok,
+		TotalSessions:          len(m.sessions),
+		TotalRequests:          m.totalReqs,
+		TotalInputTokens:       m.totalInTok,
+		TotalOutputTokens:      m.totalOutTok,
+		TotalCachedInputTokens: m.totalCachedTok,
+		TotalReasoningTokens:   m.totalReasoningTok,
+		TotalTokens:            m.totalTok,
 	}
 }
 
@@ -461,6 +491,9 @@ func (m *Manager) Clear() {
 	m.totalReqs = 0
 	m.totalInTok = 0
 	m.totalOutTok = 0
+	m.totalTok = 0
+	m.totalCachedTok = 0
+	m.totalReasoningTok = 0
 	if m.sessionStore != nil {
 		_ = m.sessionStore.ClearSessions()
 	}

@@ -4,14 +4,24 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
+	"github.com/vogler75/babel-gate/pkg/providers/toolnames"
 )
+
+var googleToolNameConstraints = toolnames.Constraints{
+	MaxLength: 128,
+	Allowed: func(r rune) bool {
+		return toolnames.ASCII(r) || r == ':' || r == '.'
+	},
+}
 
 // ToGoogleRequest converts a CanonicalRequest into a Google GenerateContentRequest.
 func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, error) {
-	out := &GenerateContentRequest{}
+	req, names := toolnames.Normalize(req, googleToolNameConstraints)
+	out := &GenerateContentRequest{names: names, signatureScope: req.SessionID}
 
 	// System Instruction
 	if sys := req.SystemPrompt(); sys != "" {
@@ -44,14 +54,50 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 		}
 	}
 
+	if req.ToolChoice != nil {
+		cfg := FunctionCallingConfig{}
+		switch strings.ToLower(req.ToolChoice.Mode) {
+		case "", "auto":
+			cfg.Mode = "AUTO"
+		case "none":
+			cfg.Mode = "NONE"
+		case "any", "required":
+			cfg.Mode = "ANY"
+		case "named":
+			if req.ToolChoice.Name == "" {
+				return nil, fmt.Errorf("named tool choice requires a tool name")
+			}
+			cfg.Mode = "ANY"
+			cfg.AllowedFunctionNames = []string{req.ToolChoice.Name}
+		default:
+			return nil, fmt.Errorf("unsupported tool choice mode %q", req.ToolChoice.Mode)
+		}
+		out.ToolConfig = &ToolConfig{FunctionCallingConfig: cfg}
+	}
+
 	// GenerationConfig
-	if req.Params.Temperature != nil || req.Params.TopP != nil || req.Params.TopK != nil || req.Params.MaxTokens != nil || len(req.Params.Stop) > 0 {
+	if req.Params.Temperature != nil || req.Params.TopP != nil || req.Params.TopK != nil || req.Params.MaxTokens != nil || len(req.Params.Stop) > 0 || req.Thinking != nil {
 		out.GenerationConfig = &GenerationConfig{
 			Temperature:     req.Params.Temperature,
 			TopP:            req.Params.TopP,
 			TopK:            req.Params.TopK,
 			MaxOutputTokens: req.Params.MaxTokens,
 			StopSequences:   req.Params.Stop,
+		}
+		if req.Thinking != nil {
+			include := req.Thinking.IncludeThoughts
+			if include == nil && req.Thinking.Type != "" {
+				value := req.Thinking.Type != "disabled"
+				include = &value
+			}
+			budget := req.Thinking.BudgetTokens
+			if budget == nil && req.Thinking.Type == "disabled" {
+				zero := 0
+				budget = &zero
+			}
+			out.GenerationConfig.ThinkingConfig = &ThinkingConfig{
+				ThinkingBudget: budget, ThinkingLevel: req.Thinking.Level, IncludeThoughts: include,
+			}
 		}
 	}
 
@@ -108,26 +154,40 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 					}
 				case canonical.PartThinking:
 					if p.Thinking != "" {
-						parts = append(parts, Part{Text: p.Thinking, Thought: true})
+						signature := p.ThoughtSignature
+						if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != "google" {
+							signature = ""
+						}
+						parts = append(parts, Part{Text: p.Thinking, Thought: true, ThoughtSignature: signature})
 					}
 				case canonical.PartToolCall:
 					var args map[string]any
 					if p.ToolCallArgs != "" {
-						_ = json.Unmarshal([]byte(p.ToolCallArgs), &args)
+						if err := json.Unmarshal([]byte(p.ToolCallArgs), &args); err != nil {
+							return nil, fmt.Errorf("invalid arguments for tool %q (%s): %w", p.ToolCallName, p.ToolCallID, err)
+						}
 					}
 					if args == nil {
 						args = make(map[string]any)
 					}
 
-					// Resolve thought signature:
-					// 1. From canonical part if present
-					// 2. From cache by ToolCallID and tool name
-					// 3. Fallback to Google's official sentinel "skip_thought_signature_validator"
+					// Preserve Google's in-band signature state exactly. Cross-protocol
+					// histories have no signature field, so recover a scoped signature
+					// (including a known intentional omission) or use Google's validator
+					// bypass sentinel for a genuinely unknown call.
 					sig := p.ThoughtSignature
-					if sig == "" && p.ToolCallID != "" {
-						sig = GetThoughtSignature(p.ToolCallID)
-					}
-					if sig == "" {
+					switch p.ThoughtSignatureProvider {
+					case "google":
+						// An empty value is meaningful for later parallel calls.
+					case "":
+						var found bool
+						if p.ToolCallID != "" {
+							sig, found = lookupThoughtSignatureForScope(req.SessionID, p.ToolCallID)
+						}
+						if !found {
+							sig = "skip_thought_signature_validator"
+						}
+					default:
 						sig = "skip_thought_signature_validator"
 					}
 
@@ -227,27 +287,7 @@ func ToGoogleRequest(req *canonical.CanonicalRequest) (*GenerateContentRequest, 
 		}
 
 		if hasToolCalls {
-			// A model turn with tool calls MUST have matching FunctionResponse(s) in the following user turn.
-			// If tool calls are unanswered at the end of the history, we cannot just append Text: "Continue"
-			// because Gemini strictly rejects text responses to function calls with:
-			// "Requests ending with a model turn are not supported."
-			var respParts []Part
-			for _, p := range last.Parts {
-				if p.FunctionCall != nil {
-					respParts = append(respParts, Part{
-						FunctionResponse: &FunctionResponse{
-							ID:       p.FunctionCall.ID,
-							Name:     p.FunctionCall.Name,
-							Response: map[string]any{"output": "cancelled or unavailable"},
-						},
-					})
-				}
-			}
-			out.Contents = append(out.Contents, Content{
-				Role:  "user",
-				Parts: respParts,
-			})
-			break
+			return nil, fmt.Errorf("conversation ends with unanswered function call(s); matching tool results are required")
 		}
 
 		// Non-empty prefill or trailing model turn without tool calls: append user turn to prompt completion
@@ -300,14 +340,18 @@ func sanitizeGoogleSchema(v any) any {
 	switch val := v.(type) {
 	case map[string]any:
 		res := make(map[string]any)
+		source := make(map[string]any, len(val))
+		for key, child := range val {
+			source[key] = child
+		}
 
 		// Check anyOf / oneOf / allOf and fold first option
 		for _, unionKey := range []string{"anyOf", "oneOf", "allOf"} {
-			if unionArr, ok := val[unionKey].([]any); ok && len(unionArr) > 0 {
+			if unionArr, ok := source[unionKey].([]any); ok && len(unionArr) > 0 {
 				if first, ok := unionArr[0].(map[string]any); ok {
 					for fk, fv := range first {
-						if _, exists := val[fk]; !exists {
-							val[fk] = fv
+						if _, exists := source[fk]; !exists {
+							source[fk] = fv
 						}
 					}
 					res["nullable"] = true
@@ -316,7 +360,7 @@ func sanitizeGoogleSchema(v any) any {
 		}
 
 		// Handle type
-		if tVal, exists := val["type"]; exists {
+		if tVal, exists := source["type"]; exists {
 			if typeStr, ok := tVal.(string); ok {
 				res["type"] = strings.ToUpper(typeStr)
 			} else if typeArr, ok := tVal.([]any); ok {
@@ -330,22 +374,22 @@ func sanitizeGoogleSchema(v any) any {
 			}
 		}
 		if _, exists := res["type"]; !exists {
-			if _, hasProps := val["properties"]; hasProps {
+			if _, hasProps := source["properties"]; hasProps {
 				res["type"] = "OBJECT"
 			} else {
 				res["type"] = "STRING"
 			}
 		}
 
-		if desc, ok := val["description"].(string); ok && desc != "" {
+		if desc, ok := source["description"].(string); ok && desc != "" {
 			res["description"] = desc
 		}
 
-		if nullable, ok := val["nullable"].(bool); ok {
+		if nullable, ok := source["nullable"].(bool); ok {
 			res["nullable"] = nullable
 		}
 
-		if req, ok := val["required"].([]any); ok {
+		if req, ok := source["required"].([]any); ok {
 			var reqStrings []string
 			for _, r := range req {
 				if rs, ok := r.(string); ok {
@@ -355,11 +399,11 @@ func sanitizeGoogleSchema(v any) any {
 			if len(reqStrings) > 0 {
 				res["required"] = reqStrings
 			}
-		} else if req, ok := val["required"].([]string); ok && len(req) > 0 {
+		} else if req, ok := source["required"].([]string); ok && len(req) > 0 {
 			res["required"] = req
 		}
 
-		if props, ok := val["properties"].(map[string]any); ok {
+		if props, ok := source["properties"].(map[string]any); ok {
 			cleanProps := make(map[string]any)
 			for pk, pv := range props {
 				cleanProps[pk] = sanitizeGoogleSchema(pv)
@@ -367,11 +411,11 @@ func sanitizeGoogleSchema(v any) any {
 			res["properties"] = cleanProps
 		}
 
-		if items, exists := val["items"]; exists {
+		if items, exists := source["items"]; exists {
 			res["items"] = sanitizeGoogleSchema(items)
 		}
 
-		if enumVal, ok := val["enum"].([]any); ok {
+		if enumVal, ok := source["enum"].([]any); ok {
 			var enumStrs []string
 			for _, e := range enumVal {
 				enumStrs = append(enumStrs, fmt.Sprintf("%v", e))
@@ -424,29 +468,91 @@ func sanitizeToolID(name string) string {
 
 // FromGoogleResponse converts a Google GenerateContentResponse into a CanonicalResponse.
 func FromGoogleResponse(resp *GenerateContentResponse, model string) (*canonical.CanonicalResponse, error) {
+	// This stateless helper has no request/session scope and therefore does not
+	// populate the process-wide signature cache. Client execution supplies the
+	// scoped key used for a real conversation.
+	return fromGoogleResponse(resp, model, nil, "")
+}
+
+func googleResponseError(resp *GenerateContentResponse) error {
+	if resp != nil && resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
+		message := resp.PromptFeedback.BlockReasonMessage
+		if message == "" {
+			message = "prompt was blocked"
+		}
+		return fmt.Errorf("Google Gemini prompt blocked (%s): %s", resp.PromptFeedback.BlockReason, message)
+	}
+	return nil
+}
+
+func canonicalGoogleFinishReason(reason, message string, hasToolCalls bool) (string, error) {
+	switch strings.ToUpper(reason) {
+	case "STOP":
+		if hasToolCalls {
+			return "tool_calls", nil
+		}
+		return "stop", nil
+	case "MAX_TOKENS":
+		if hasToolCalls {
+			return "tool_calls", nil
+		}
+		return "length", nil
+	case "":
+		return "", nil
+	default:
+		if message != "" {
+			return "", fmt.Errorf("Google Gemini generation ended with %s: %s", reason, message)
+		}
+		return "", fmt.Errorf("Google Gemini generation ended with %s", reason)
+	}
+}
+
+func googleCandidateError(cand Candidate) error {
+	for _, rating := range cand.SafetyRatings {
+		if rating.Blocked {
+			return fmt.Errorf("Google Gemini candidate blocked by %s (%s)", rating.Category, rating.Probability)
+		}
+	}
+	return nil
+}
+
+func canonicalGoogleUsage(usage *UsageMetadata) *canonical.Usage {
+	if usage == nil {
+		return nil
+	}
+	return &canonical.Usage{
+		PromptTokens:         usage.PromptTokenCount,
+		CompletionTokens:     usage.CandidatesTokenCount,
+		TotalTokens:          usage.TotalTokenCount,
+		CacheReadInputTokens: usage.CachedContentTokenCount,
+		ReasoningTokens:      usage.ThoughtsTokenCount,
+	}
+}
+
+func fromGoogleResponse(resp *GenerateContentResponse, model string, names *toolnames.Mapping, signatureScope string) (*canonical.CanonicalResponse, error) {
+	if err := googleResponseError(resp); err != nil {
+		return nil, err
+	}
 	if len(resp.Candidates) == 0 {
 		return nil, fmt.Errorf("no candidates returned by Google Gemini")
 	}
 
 	cand := resp.Candidates[0]
+	if err := googleCandidateError(cand); err != nil {
+		return nil, err
+	}
 	msg := canonical.Message{
 		Role: canonical.RoleAssistant,
 	}
 
 	finishReason := "stop"
 	hasToolCalls := false
-	latestSignature := ""
-
-	for i, part := range cand.Content.Parts {
-		if part.ThoughtSignature != "" {
-			latestSignature = part.ThoughtSignature
-		}
-
+	for _, part := range cand.Content.Parts {
 		if part.Text != "" {
 			if part.Thought {
 				msg.Parts = append(msg.Parts, canonical.ContentPart{
-					Type:     canonical.PartThinking,
-					Thinking: part.Text,
+					Type: canonical.PartThinking, Thinking: part.Text,
+					ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google",
 				})
 			} else {
 				msg.Parts = append(msg.Parts, canonical.ContentPart{
@@ -457,35 +563,42 @@ func FromGoogleResponse(resp *GenerateContentResponse, model string) (*canonical
 		}
 		if part.FunctionCall != nil {
 			hasToolCalls = true
-			argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+			args := part.FunctionCall.Args
+			if args == nil {
+				args = map[string]any{}
+			}
+			argsJSON, _ := json.Marshal(args)
 
 			callID := part.FunctionCall.ID
 			if callID == "" {
-				callID = fmt.Sprintf("call_%s_%d", sanitizeToolID(part.FunctionCall.Name), i)
+				callID = "call_" + rand.Text()
 			}
 
 			sig := part.ThoughtSignature
-			if sig == "" {
-				sig = latestSignature
-			}
-			if sig != "" {
-				StoreThoughtSignature(callID, sig)
+			storeThoughtSignaturePresenceForScope(signatureScope, callID, sig)
+			name := part.FunctionCall.Name
+			if names != nil {
+				name = names.Original(name)
 			}
 
 			msg.Parts = append(msg.Parts, canonical.ContentPart{
-				Type:             canonical.PartToolCall,
-				ToolCallID:       callID,
-				ToolCallName:     part.FunctionCall.Name,
-				ToolCallArgs:     string(argsJSON),
-				ThoughtSignature: sig,
+				Type:                     canonical.PartToolCall,
+				ToolCallID:               callID,
+				ToolCallName:             name,
+				ToolCallArgs:             string(argsJSON),
+				ThoughtSignature:         sig,
+				ThoughtSignatureProvider: "google",
 			})
 		}
 	}
 
-	if hasToolCalls {
-		finishReason = "tool_calls"
-	} else if strings.EqualFold(cand.FinishReason, "MAX_TOKENS") {
-		finishReason = "length"
+	var err error
+	finishReason, err = canonicalGoogleFinishReason(cand.FinishReason, cand.FinishMessage, hasToolCalls)
+	if err != nil {
+		return nil, err
+	}
+	if finishReason == "" {
+		return nil, io.ErrUnexpectedEOF
 	}
 
 	canonicalResp := &canonical.CanonicalResponse{
@@ -495,12 +608,8 @@ func FromGoogleResponse(resp *GenerateContentResponse, model string) (*canonical
 		FinishReason: finishReason,
 	}
 
-	if resp.UsageMetadata != nil {
-		canonicalResp.Usage = canonical.Usage{
-			PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      resp.UsageMetadata.TotalTokenCount,
-		}
+	if usage := canonicalGoogleUsage(resp.UsageMetadata); usage != nil {
+		canonicalResp.Usage = *usage
 	}
 
 	return canonicalResp, nil
@@ -508,52 +617,58 @@ func FromGoogleResponse(resp *GenerateContentResponse, model string) (*canonical
 
 // ParseGoogleStreamEvent converts a Google Gemini stream chunk into canonical events.
 func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEvent, error) {
+	// This stateless helper has no request/session scope, so it must not put
+	// opaque thought signatures into the process cache. The provider client
+	// supplies a scoped key on the production path.
+	return parseGoogleStreamEvent(data, model, nil, "")
+}
+
+func parseGoogleStreamEvent(data []byte, model string, names *toolnames.Mapping, signatureScope string) ([]canonical.CanonicalEvent, error) {
 	var resp GenerateContentResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	if err := googleResponseError(&resp); err != nil {
 		return nil, err
 	}
 
 	var events []canonical.CanonicalEvent
 
-	if resp.UsageMetadata != nil {
+	if usage := canonicalGoogleUsage(resp.UsageMetadata); usage != nil {
 		events = append(events, canonical.CanonicalEvent{
 			Type:  canonical.EventMessageDelta,
 			Model: model,
-			Usage: &canonical.Usage{
-				PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-				CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:      resp.UsageMetadata.TotalTokenCount,
-			},
+			Usage: usage,
 		})
 	}
 
 	for _, cand := range resp.Candidates {
+		if err := googleCandidateError(cand); err != nil {
+			return nil, err
+		}
 		firstEvent := len(events)
-		latestSignature := ""
+		hasToolCalls := false
 		for i, part := range cand.Content.Parts {
-			if part.ThoughtSignature != "" {
-				latestSignature = part.ThoughtSignature
-			}
-
 			if part.Text != "" {
 				if part.Thought {
 					events = append(events, canonical.CanonicalEvent{
-						Type:     canonical.EventThinkingDelta,
-						Index:    cand.Index,
-						Thinking: part.Text,
-						Model:    model,
+						Type: canonical.EventThinkingDelta, Index: cand.Index, Thinking: part.Text,
+						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google", Model: model,
 					})
 				} else {
 					events = append(events, canonical.CanonicalEvent{
-						Type:  canonical.EventTextDelta,
-						Index: cand.Index,
-						Text:  part.Text,
-						Model: model,
+						Type: canonical.EventTextDelta, Index: cand.Index, Text: part.Text,
+						ThoughtSignature: part.ThoughtSignature, ThoughtSignatureProvider: "google", Model: model,
 					})
 				}
 			}
 			if part.FunctionCall != nil {
-				argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+				hasToolCalls = true
+				args := part.FunctionCall.Args
+				if args == nil {
+					args = map[string]any{}
+				}
+				argsJSON, _ := json.Marshal(args)
 
 				callID := part.FunctionCall.ID
 				if callID == "" {
@@ -561,20 +676,20 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 				}
 
 				sig := part.ThoughtSignature
-				if sig == "" {
-					sig = latestSignature
-				}
-				if sig != "" {
-					StoreThoughtSignature(callID, sig)
+				storeThoughtSignaturePresenceForScope(signatureScope, callID, sig)
+				name := part.FunctionCall.Name
+				if names != nil {
+					name = names.Original(name)
 				}
 
 				events = append(events, canonical.CanonicalEvent{
-					Type:             canonical.EventToolCallStart,
-					Index:            i,
-					ToolCallID:       callID,
-					ToolCallName:     part.FunctionCall.Name,
-					ThoughtSignature: sig,
-					Model:            model,
+					Type:                     canonical.EventToolCallStart,
+					Index:                    i,
+					ToolCallID:               callID,
+					ToolCallName:             name,
+					ThoughtSignature:         sig,
+					ThoughtSignatureProvider: "google",
+					Model:                    model,
 				})
 				events = append(events, canonical.CanonicalEvent{
 					Type:             canonical.EventToolCallDelta,
@@ -595,9 +710,9 @@ func ParseGoogleStreamEvent(data []byte, model string) ([]canonical.CanonicalEve
 		}
 
 		if cand.FinishReason != "" {
-			reason := "stop"
-			if cand.FinishReason == "MAX_TOKENS" {
-				reason = "length"
+			reason, err := canonicalGoogleFinishReason(cand.FinishReason, cand.FinishMessage, hasToolCalls)
+			if err != nil {
+				return nil, err
 			}
 			events = append(events, canonical.CanonicalEvent{
 				Type:         canonical.EventMessageDelta,
@@ -619,6 +734,23 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 	out := &canonical.CanonicalRequest{
 		Model: model,
 	}
+	if req.ToolConfig != nil {
+		cfg := req.ToolConfig.FunctionCallingConfig
+		switch strings.ToUpper(cfg.Mode) {
+		case "", "AUTO":
+			out.ToolChoice = &canonical.ToolChoice{Mode: "auto"}
+		case "NONE":
+			out.ToolChoice = &canonical.ToolChoice{Mode: "none"}
+		case "ANY":
+			if len(cfg.AllowedFunctionNames) == 1 {
+				out.ToolChoice = &canonical.ToolChoice{Mode: "named", Name: cfg.AllowedFunctionNames[0]}
+			} else {
+				out.ToolChoice = &canonical.ToolChoice{Mode: "required"}
+			}
+		default:
+			return nil, fmt.Errorf("unsupported Google function calling mode %q", cfg.Mode)
+		}
+	}
 
 	if req.GenerationConfig != nil {
 		out.Params = canonical.Parameters{
@@ -627,6 +759,15 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 			TopK:        req.GenerationConfig.TopK,
 			MaxTokens:   req.GenerationConfig.MaxOutputTokens,
 			Stop:        req.GenerationConfig.StopSequences,
+		}
+		if cfg := req.GenerationConfig.ThinkingConfig; cfg != nil {
+			typeName := "enabled"
+			if (cfg.IncludeThoughts != nil && !*cfg.IncludeThoughts) || (cfg.ThinkingBudget != nil && *cfg.ThinkingBudget == 0) {
+				typeName = "disabled"
+			}
+			out.Thinking = &canonical.ThinkingConfig{
+				Type: typeName, BudgetTokens: cfg.ThinkingBudget, Level: cfg.ThinkingLevel, IncludeThoughts: cfg.IncludeThoughts,
+			}
 		}
 	}
 
@@ -721,10 +862,14 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 			}
 
 			if p.Text != "" {
-				parts = append(parts, canonical.ContentPart{
-					Type: canonical.PartText,
-					Text: p.Text,
-				})
+				if p.Thought {
+					parts = append(parts, canonical.ContentPart{
+						Type: canonical.PartThinking, Thinking: p.Text,
+						ThoughtSignature: p.ThoughtSignature, ThoughtSignatureProvider: "google",
+					})
+				} else {
+					parts = append(parts, canonical.ContentPart{Type: canonical.PartText, Text: p.Text})
+				}
 			}
 			if p.InlineData != nil {
 				parts = append(parts, canonical.ContentPart{
@@ -734,7 +879,11 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 				})
 			}
 			if p.FunctionCall != nil {
-				argsJSON, _ := json.Marshal(p.FunctionCall.Args)
+				args := p.FunctionCall.Args
+				if args == nil {
+					args = map[string]any{}
+				}
+				argsJSON, _ := json.Marshal(args)
 				callID := p.FunctionCall.ID
 				if callID == "" {
 					for n := len(usedIDs); ; n++ {
@@ -747,11 +896,12 @@ func FromGoogleRequest(req *GenerateContentRequest, model string) (*canonical.Ca
 				usedIDs[callID] = true
 				pending[callID] = p.FunctionCall.Name
 				parts = append(parts, canonical.ContentPart{
-					Type:             canonical.PartToolCall,
-					ToolCallID:       callID,
-					ToolCallName:     p.FunctionCall.Name,
-					ToolCallArgs:     string(argsJSON),
-					ThoughtSignature: p.ThoughtSignature,
+					Type:                     canonical.PartToolCall,
+					ToolCallID:               callID,
+					ToolCallName:             p.FunctionCall.Name,
+					ToolCallArgs:             string(argsJSON),
+					ThoughtSignature:         p.ThoughtSignature,
+					ThoughtSignatureProvider: "google",
 				})
 			}
 		}
@@ -776,21 +926,31 @@ func ToGoogleResponse(resp *canonical.CanonicalResponse) (*GenerateContentRespon
 			parts = append(parts, Part{Text: p.Text})
 		case canonical.PartThinking:
 			if p.Thinking != "" {
-				parts = append(parts, Part{Text: p.Thinking, Thought: true})
+				sig := p.ThoughtSignature
+				if p.ThoughtSignatureProvider != "" && p.ThoughtSignatureProvider != "google" {
+					sig = ""
+				}
+				parts = append(parts, Part{Text: p.Thinking, Thought: true, ThoughtSignature: sig})
 			}
 		case canonical.PartToolCall:
 			var args map[string]any
 			if p.ToolCallArgs != "" {
-				_ = json.Unmarshal([]byte(p.ToolCallArgs), &args)
+				if err := json.Unmarshal([]byte(p.ToolCallArgs), &args); err != nil {
+					return nil, fmt.Errorf("invalid arguments for tool %q (%s): %w", p.ToolCallName, p.ToolCallID, err)
+				}
 			}
 			if args == nil {
 				args = make(map[string]any)
 			}
 			sig := p.ThoughtSignature
-			if sig == "" && p.ToolCallID != "" {
-				sig = GetThoughtSignature(p.ToolCallID)
-			}
-			if sig == "" {
+			switch p.ThoughtSignatureProvider {
+			case "google":
+				// Preserve an intentional omission on later parallel calls.
+			case "":
+				if sig == "" {
+					sig = "skip_thought_signature_validator"
+				}
+			default:
 				sig = "skip_thought_signature_validator"
 			}
 			parts = append(parts, Part{
@@ -821,9 +981,11 @@ func ToGoogleResponse(resp *canonical.CanonicalResponse) (*GenerateContentRespon
 			},
 		},
 		UsageMetadata: &UsageMetadata{
-			PromptTokenCount:     resp.Usage.PromptTokens,
-			CandidatesTokenCount: resp.Usage.CompletionTokens,
-			TotalTokenCount:      resp.Usage.TotalTokens,
+			PromptTokenCount:        resp.Usage.PromptTokens,
+			CandidatesTokenCount:    resp.Usage.CompletionTokens,
+			TotalTokenCount:         resp.Usage.TotalTokens,
+			CachedContentTokenCount: resp.Usage.CacheReadInputTokens,
+			ThoughtsTokenCount:      resp.Usage.ReasoningTokens,
 		},
 	}, nil
 }

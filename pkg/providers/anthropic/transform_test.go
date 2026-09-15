@@ -323,3 +323,26 @@ func TestThinkingSignaturePreservation(t *testing.T) {
 		t.Errorf("signature not preserved in ToAnthropicRequest: %+v", anthBlocks[0])
 	}
 }
+
+func TestIssue2AnthropicThinkingControlsRoundTrip(t *testing.T) {
+	budget := 2048
+	req := &MessageRequest{
+		Model: "claude-test", MaxTokens: 4096,
+		Thinking: &ThinkingConfig{Type: "enabled", BudgetTokens: &budget},
+		Messages: []Message{{Role: "user", Content: "question"}},
+	}
+	canonicalReq, err := FromAnthropicRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalReq.Thinking == nil || canonicalReq.Thinking.Type != "enabled" || canonicalReq.Thinking.BudgetTokens == nil || *canonicalReq.Thinking.BudgetTokens != budget {
+		t.Fatalf("thinking controls lost on input: %+v", canonicalReq.Thinking)
+	}
+	wire, err := ToAnthropicRequest(canonicalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.Thinking == nil || wire.Thinking.Type != "enabled" || wire.Thinking.BudgetTokens == nil || *wire.Thinking.BudgetTokens != budget {
+		t.Fatalf("thinking controls lost on output: %+v", wire.Thinking)
+	}
+}

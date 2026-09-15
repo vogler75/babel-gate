@@ -36,9 +36,9 @@ func (s *Store) SaveSession(sess *session.Session) error {
 	INSERT INTO sessions (
 		id, client, client_ip, user_agent, created_at, last_active,
 		last_model, request_count, context_tokens, context_tokens_estimated,
-		input_tokens, output_tokens, total_tokens, tokens_per_second,
+		input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
 		generation_duration_ms, measured_output_tokens, models, model_stats
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		client = excluded.client,
 		client_ip = excluded.client_ip,
@@ -51,6 +51,8 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		context_tokens_estimated = excluded.context_tokens_estimated,
 		input_tokens = excluded.input_tokens,
 		output_tokens = excluded.output_tokens,
+		cached_input_tokens = excluded.cached_input_tokens,
+		reasoning_tokens = excluded.reasoning_tokens,
 		total_tokens = excluded.total_tokens,
 		tokens_per_second = excluded.tokens_per_second,
 		generation_duration_ms = excluded.generation_duration_ms,
@@ -66,7 +68,7 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		sess.ID, sess.Client, sess.ClientIP, sess.UserAgent,
 		createdAtStr, lastActiveStr, sess.LastModel,
 		sess.RequestCount, sess.ContextTokens, ctxEst,
-		sess.InputTokens, sess.OutputTokens, sess.TotalTokens,
+		sess.InputTokens, sess.OutputTokens, sess.CachedInputTokens, sess.ReasoningTokens, sess.TotalTokens,
 		sess.TokensPerSecond, sess.GenerationDurationMs, sess.MeasuredOutputTokens,
 		string(modelsJSON), string(modelStatsJSON),
 	)
@@ -100,8 +102,8 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 	INSERT INTO session_requests (
 		id, session_id, timestamp, provider, model, stream,
 		duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
-		output_tokens, total_tokens, tokens_per_second, status, error_message
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		session_id = excluded.session_id,
 		timestamp = excluded.timestamp,
@@ -113,6 +115,8 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 		input_tokens = excluded.input_tokens,
 		input_tokens_estimated = excluded.input_tokens_estimated,
 		output_tokens = excluded.output_tokens,
+		cached_input_tokens = excluded.cached_input_tokens,
+		reasoning_tokens = excluded.reasoning_tokens,
 		total_tokens = excluded.total_tokens,
 		tokens_per_second = excluded.tokens_per_second,
 		status = excluded.status,
@@ -125,7 +129,7 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 	_, err := s.db.Exec(query,
 		rec.ID, sessionID, tsStr, rec.Provider, rec.Model, streamInt,
 		rec.DurationMs, rec.GenerationDurationMs, rec.InputTokens, inEstInt,
-		rec.OutputTokens, rec.TotalTokens, rec.TokensPerSecond,
+		rec.OutputTokens, rec.CachedInputTokens, rec.ReasoningTokens, rec.TotalTokens, rec.TokensPerSecond,
 		rec.Status, rec.ErrorMessage,
 	)
 	return err
@@ -152,7 +156,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	rows, err := s.db.Query(`
 		SELECT id, client, client_ip, user_agent, created_at, last_active,
 		       last_model, request_count, context_tokens, context_tokens_estimated,
-		       input_tokens, output_tokens, total_tokens, tokens_per_second,
+		       input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
 		       generation_duration_ms, measured_output_tokens, models, model_stats
 		FROM sessions
 		WHERE last_active >= ?
@@ -167,22 +171,22 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	var sessions []*session.Session
 	for rows.Next() {
 		var (
-			id, client, clientIP, userAgent string
-			createdAtStr, lastActiveStr      string
-			lastModel                        string
-			reqCount, ctxTok, ctxTokEst      int
-			inTok, outTok, totTok            int
-			tps                              float64
-			genDurMs                         int64
-			measOutTok                       int
-			modelsJSON, modelStatsJSON       string
+			id, client, clientIP, userAgent                string
+			createdAtStr, lastActiveStr                    string
+			lastModel                                      string
+			reqCount, ctxTok, ctxTokEst                    int
+			inTok, outTok, cachedTok, reasoningTok, totTok int
+			tps                                            float64
+			genDurMs                                       int64
+			measOutTok                                     int
+			modelsJSON, modelStatsJSON                     string
 		)
 		if err := rows.Scan(
 			&id, &client, &clientIP, &userAgent,
 			&createdAtStr, &lastActiveStr,
 			&lastModel,
 			&reqCount, &ctxTok, &ctxTokEst,
-			&inTok, &outTok, &totTok,
+			&inTok, &outTok, &cachedTok, &reasoningTok, &totTok,
 			&tps, &genDurMs, &measOutTok, &modelsJSON, &modelStatsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scanning session row: %w", err)
@@ -226,6 +230,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			ContextTokensEstimated: ctxTokEst != 0,
 			InputTokens:            inTok,
 			OutputTokens:           outTok,
+			CachedInputTokens:      cachedTok,
+			ReasoningTokens:        reasoningTok,
 			TotalTokens:            totTok,
 			TokensPerSecond:        tps,
 			GenerationDurationMs:   genDurMs,
@@ -244,7 +250,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	reqStmt, err := s.db.Prepare(`
 		SELECT id, timestamp, provider, model, stream,
 		       duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
-		       output_tokens, total_tokens, tokens_per_second, status, error_message
+		       output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
 		FROM session_requests
 		WHERE session_id = ?
 		ORDER BY timestamp DESC
@@ -263,17 +269,17 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 
 		for reqRows.Next() {
 			var (
-				reqID, tsStr, provider, model   string
-				streamInt                       int
-				durMs, genDurMs                 int64
-				inTok, inTokEst, outTok, totTok int
-				tps                             float64
-				status, errMsg                  string
+				reqID, tsStr, provider, model                            string
+				streamInt                                                int
+				durMs, genDurMs                                          int64
+				inTok, inTokEst, outTok, cachedTok, reasoningTok, totTok int
+				tps                                                      float64
+				status, errMsg                                           string
 			)
 			if err := reqRows.Scan(
 				&reqID, &tsStr, &provider, &model, &streamInt,
 				&durMs, &genDurMs, &inTok, &inTokEst,
-				&outTok, &totTok, &tps, &status, &errMsg,
+				&outTok, &cachedTok, &reasoningTok, &totTok, &tps, &status, &errMsg,
 			); err != nil {
 				continue
 			}
@@ -294,6 +300,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 				InputTokens:          inTok,
 				InputTokensEstimated: inTokEst != 0,
 				OutputTokens:         outTok,
+				CachedInputTokens:    cachedTok,
+				ReasoningTokens:      reasoningTok,
 				TotalTokens:          totTok,
 				TokensPerSecond:      tps,
 				Status:               status,
@@ -319,6 +327,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 				st.RequestCount++
 				st.InputTokens += r.InputTokens
 				st.OutputTokens += r.OutputTokens
+				st.CachedInputTokens += r.CachedInputTokens
+				st.ReasoningTokens += r.ReasoningTokens
 				st.TotalTokens += r.TotalTokens
 				if st.LastUsed.Before(r.Timestamp) {
 					st.LastUsed = r.Timestamp

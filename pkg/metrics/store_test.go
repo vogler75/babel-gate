@@ -463,3 +463,45 @@ func TestStore_GetModelSpeedMetrics(t *testing.T) {
 		t.Fatalf("expected 1 google model, got %+v", respFilter.Models)
 	}
 }
+
+func TestIssue2DetailedGoogleUsagePersistence(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "detailed.db"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now()
+	if err := store.RecordDetailed(now, "google", "google/gemini-test", 100, 40, 140, 60, 25, false); err != nil {
+		t.Fatal(err)
+	}
+	var cached, reasoning int
+	if err := store.db.QueryRow(`SELECT cached_input_tokens, reasoning_tokens FROM hourly_metrics WHERE provider = 'google' AND model = 'google/gemini-test'`).Scan(&cached, &reasoning); err != nil {
+		t.Fatal(err)
+	}
+	if cached != 60 || reasoning != 25 {
+		t.Fatalf("detailed hourly usage lost: cached=%d reasoning=%d", cached, reasoning)
+	}
+	summary, err := store.GetSummary(now, now, "google")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CachedInputTokens != 60 || summary.ReasoningTokens != 25 || len(summary.TopModels) != 1 || summary.TopModels[0].ReasoningTokens != 25 {
+		t.Fatalf("detailed usage is not exposed by metrics queries: %+v", summary)
+	}
+
+	sess := &session.Session{ID: "detail", Client: "test", CreatedAt: now, LastActive: now, Models: []string{}, ModelStats: map[string]*session.ModelUsage{}}
+	if err := store.SaveSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	rec := session.RequestRecord{ID: "request-detail", Timestamp: now, Provider: "google", Model: "google/gemini-test", InputTokens: 100, OutputTokens: 40, TotalTokens: 140, CachedInputTokens: 60, ReasoningTokens: 25, Status: "success"}
+	if err := store.SaveRequest(sess.ID, rec); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadActiveSessions(now.Add(-time.Minute), 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || len(loaded[0].RecentRequests) != 1 || loaded[0].RecentRequests[0].CachedInputTokens != 60 || loaded[0].RecentRequests[0].ReasoningTokens != 25 {
+		t.Fatalf("detailed request usage lost after reload: %+v", loaded)
+	}
+}

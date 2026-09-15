@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -56,6 +57,9 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 	}
 
 	sess := ResolveSession(h.sessions, r)
+	if sess != nil {
+		canonReq.SessionID = sess.ID
+	}
 
 	if !req.Stream {
 		h.handleNonStreaming(w, r, canonReq, sess, startTime)
@@ -91,6 +95,7 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	inTokens := resp.Usage.PromptTokens
 	inputEstimated := inTokens == 0
@@ -100,6 +105,10 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+	totalTokens := resp.Usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = inTokens + outTokens
 	}
 
 	if tr != nil {
@@ -115,7 +124,9 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 			InputTokens:          inTokens,
 			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
+			CachedInputTokens:    resp.Usage.CacheReadInputTokens,
+			ReasoningTokens:      resp.Usage.ReasoningTokens,
+			TotalTokens:          totalTokens,
 			Status:               "success",
 		})
 	}
@@ -133,17 +144,16 @@ func (h *OpenAIHandler) handleNonStreaming(w http.ResponseWriter, r *http.Reques
 
 func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
 	estInTokens := session.EstimateRequestTokens(canonReq)
+	tr := trace.FromContext(r.Context())
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
+		if tr != nil {
+			tr.SetTokens(estInTokens, 0)
+			tr.MarkStreamDone()
+		}
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:             prov,
@@ -159,12 +169,13 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	stream := newSSEWriter(w)
 
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixMilli())
 	created := time.Now().Unix()
@@ -172,12 +183,47 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 	inTokens := estInTokens
 	inputEstimated := true
 	outTokens := 0
+	cachedInputTokens := 0
+	reasoningTokens := 0
+	totalTokens := 0
 	totalChars := 0
 	streamStatus := "success"
 	var streamErr string
+	sawDone := false
+	setFailure := func(err error) {
+		streamStatus = "error"
+		if err != nil {
+			streamErr = err.Error()
+		} else if streamErr == "" {
+			streamErr = "stream failed"
+		}
+	}
+	defer func() {
+		if outTokens == 0 {
+			outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
+		}
+		if inTokens == 0 {
+			inTokens = estInTokens
+		}
+		if totalTokens == 0 {
+			totalTokens = inTokens + outTokens
+		}
+		if tr != nil {
+			tr.SetTokens(inTokens, outTokens)
+			tr.MarkStreamDone()
+		}
+		if sess != nil && h.sessions != nil {
+			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider: prov, Model: trackingModel, Stream: true,
+				DurationMs: time.Since(startTime).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+				InputTokens: inTokens, InputTokensEstimated: inputEstimated, OutputTokens: outTokens, CachedInputTokens: cachedInputTokens, ReasoningTokens: reasoningTokens, TotalTokens: totalTokens,
+				Status: streamStatus, ErrorMessage: streamErr,
+			})
+		}
+	}()
 
 	candidateIndex := 0
-	sendChunk := func(delta map[string]any, finishReason any) {
+	sendChunk := func(delta map[string]any, finishReason any) bool {
 		chunk := map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
@@ -191,50 +237,54 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 				},
 			},
 		}
-		b, err := json.Marshal(chunk)
-		if err != nil {
-			return
+		if err := stream.data(chunk); err != nil {
+			setFailure(fmt.Errorf("downstream OpenAI SSE: %w", err))
+			cancel()
+			return false
 		}
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-		flusher.Flush()
+		return true
 	}
 
-	// Initial role event
-	sendChunk(map[string]any{"role": "assistant"}, nil)
+	if err := stream.flush(); err != nil {
+		setFailure(fmt.Errorf("downstream initial flush: %w", err))
+		return
+	}
+	if !sendChunk(map[string]any{"role": "assistant"}, nil) {
+		return
+	}
 
-	tr := trace.FromContext(r.Context())
 	for ev := range eventsChan {
 		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
 			tr.MarkFirstToken()
 		}
 		candidateIndex = ev.CandidateIndex
 		if ev.Type == canonical.EventError {
-			streamStatus = "error"
-			if ev.Error != nil {
-				streamErr = ev.Error.Error()
-			}
+			setFailure(ev.Error)
 			errChunk := map[string]any{
 				"error": map[string]any{
 					"message": streamErr,
 					"type":    "server_error",
 				},
 			}
-			b, _ := json.Marshal(errChunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-			flusher.Flush()
+			_ = stream.data(errChunk)
+			cancel()
 			return
 		}
 
 		switch ev.Type {
 		case canonical.EventThinkingDelta:
 			totalChars += len(ev.Thinking)
-			sendChunk(map[string]any{"reasoning_content": ev.Thinking}, nil)
+			if !sendChunk(map[string]any{"reasoning_content": ev.Thinking}, nil) {
+				return
+			}
 		case canonical.EventTextDelta:
 			totalChars += len(ev.Text)
-			sendChunk(map[string]any{"content": ev.Text}, nil)
+			if !sendChunk(map[string]any{"content": ev.Text}, nil) {
+				return
+			}
 
 		case canonical.EventToolCallStart:
-			sendChunk(map[string]any{
+			if !sendChunk(map[string]any{
 				"tool_calls": []map[string]any{
 					{
 						"index": ev.Index,
@@ -246,11 +296,13 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 						},
 					},
 				},
-			}, nil)
+			}, nil) {
+				return
+			}
 
 		case canonical.EventToolCallDelta:
 			totalChars += len(ev.ToolCallArgs)
-			sendChunk(map[string]any{
+			if !sendChunk(map[string]any{
 				"tool_calls": []map[string]any{
 					{
 						"index": ev.Index,
@@ -260,11 +312,15 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 						},
 					},
 				},
-			}, nil)
+			}, nil) {
+				return
+			}
 
 		case canonical.EventMessageDelta:
 			if ev.FinishReason != "" {
-				sendChunk(map[string]any{}, ev.FinishReason)
+				if !sendChunk(map[string]any{}, ev.FinishReason) {
+					return
+				}
 			}
 			if ev.Usage != nil {
 				if ev.Usage.PromptTokens > 0 {
@@ -274,18 +330,35 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
 				}
+				cachedInputTokens = ev.Usage.CacheReadInputTokens
+				reasoningTokens = ev.Usage.ReasoningTokens
+				if ev.Usage.TotalTokens > 0 {
+					totalTokens = ev.Usage.TotalTokens
+				}
 			}
+		case canonical.EventMessageDone:
+			sawDone = true
 		}
 	}
-
+	if !sawDone {
+		if r.Context().Err() != nil {
+			setFailure(r.Context().Err())
+		} else {
+			setFailure(io.ErrUnexpectedEOF)
+			_ = stream.data(map[string]any{"error": map[string]any{"message": streamErr, "type": "server_error"}})
+		}
+		return
+	}
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
 	}
 	if inTokens == 0 {
 		inTokens = estInTokens
 	}
+	if totalTokens == 0 {
+		totalTokens = inTokens + outTokens
+	}
 
-	// Send usage chunk before DONE
 	usageChunk := map[string]any{
 		"id":      id,
 		"object":  "chat.completion.chunk",
@@ -293,36 +366,22 @@ func (h *OpenAIHandler) handleStreaming(w http.ResponseWriter, r *http.Request, 
 		"model":   canonReq.Model,
 		"choices": []any{},
 		"usage": map[string]any{
-			"prompt_tokens":     inTokens,
-			"completion_tokens": outTokens,
-			"total_tokens":      inTokens + outTokens,
+			"prompt_tokens":             inTokens,
+			"completion_tokens":         outTokens,
+			"total_tokens":              totalTokens,
+			"prompt_tokens_details":     map[string]any{"cached_tokens": cachedInputTokens},
+			"completion_tokens_details": map[string]any{"reasoning_tokens": reasoningTokens},
 		},
 	}
-	bUsage, _ := json.Marshal(usageChunk)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", string(bUsage))
-
-	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
-
-	if tr != nil {
-		tr.SetTokens(inTokens, outTokens)
-		tr.MarkStreamDone()
+	if err := stream.data(usageChunk); err != nil {
+		setFailure(fmt.Errorf("downstream OpenAI usage SSE: %w", err))
+		cancel()
+		return
 	}
-
-	if sess != nil && h.sessions != nil {
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:             prov,
-			Model:                trackingModel,
-			Stream:               true,
-			DurationMs:           time.Since(startTime).Milliseconds(),
-			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-			InputTokens:          inTokens,
-			InputTokensEstimated: inputEstimated,
-			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
-			Status:               streamStatus,
-			ErrorMessage:         streamErr,
-		})
+	if err := stream.rawData("[DONE]"); err != nil {
+		setFailure(fmt.Errorf("downstream OpenAI completion SSE: %w", err))
+		cancel()
+		return
 	}
 }
 

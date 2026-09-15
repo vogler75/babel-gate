@@ -445,7 +445,7 @@ A complete template is available in [`config.example.yaml`](config.example.yaml)
 server:
   port: 8080               # Port to listen on (or use $PORT / -port flag)
   api_key: ""              # Optional: require clients to provide this key (Bearer / x-api-key)
-  timeout_seconds: 120     # Upstream request timeout
+  timeout_seconds: 120     # Incoming request read timeout; no absolute streaming write deadline
   cors_origins: ["*"]      # Allowed CORS origins
 
 # Upstream LLM Providers
@@ -456,6 +456,9 @@ providers:
     enabled: true          # Optional; defaults to true when omitted
     api_key: "${GEMINI_API_KEY}"
     priority: 1            # Priority for default selection (lower = higher priority)
+    response_header_timeout_seconds: 30 # Wait for upstream response headers (default 30)
+    stream_idle_timeout_seconds: 120     # Max gap between upstream stream bytes (default 120)
+    generation_timeout_seconds: 0       # Optional overall deadline; 0 disables it
 
   anthropic:
     type: anthropic

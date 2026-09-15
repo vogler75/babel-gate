@@ -124,6 +124,9 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
+	if sess != nil {
+		canonReq.SessionID = sess.ID
+	}
 
 	if key := r.Header.Get("x-api-key"); key != "" {
 		canonReq.AuthToken = key
@@ -476,6 +479,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 		writeAnthropicError(w, err)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	inTokens := resp.Usage.PromptTokens
 	inputEstimated := inTokens == 0
@@ -485,6 +489,10 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+	totalTokens := resp.Usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = inTokens + outTokens
 	}
 
 	if tr != nil {
@@ -500,7 +508,9 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 			InputTokens:          inTokens,
 			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
+			CachedInputTokens:    resp.Usage.CacheReadInputTokens,
+			ReasoningTokens:      resp.Usage.ReasoningTokens,
+			TotalTokens:          totalTokens,
 			Status:               "success",
 		})
 	}
@@ -518,17 +528,16 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 
 func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Request, canonReq *canonical.CanonicalRequest, sess *session.Session, startTime time.Time) {
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
 	estInTokens := session.EstimateRequestTokens(canonReq)
+	tr := trace.FromContext(r.Context())
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
+		if tr != nil {
+			tr.SetTokens(estInTokens, 0)
+			tr.MarkStreamDone()
+		}
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:             prov,
@@ -544,86 +553,132 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		writeAnthropicError(w, err)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	sendSSE := func(eventType string, data any) {
-		b, err := json.Marshal(data)
-		if err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(b))
-		flusher.Flush()
-	}
+	stream := newSSEWriter(w)
 
 	messageID := fmt.Sprintf("msg_%d", time.Now().UnixMilli())
 	modelName := canonReq.Model
-
-	// 1. Send message_start with estimated/known input tokens
-	sendSSE("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":      messageID,
-			"type":    "message",
-			"role":    "assistant",
-			"model":   modelName,
-			"content": []any{},
-			"usage": map[string]any{
-				"input_tokens":  estInTokens,
-				"output_tokens": 0,
-			},
-		},
-	})
-
 	currentBlockIndex := 0
 	activeBlockType := "" // "text", "thinking", "tool_use"
 	stopReason := "end_turn"
 	inTokens := estInTokens
 	inputEstimated := true
 	outTokens := 0
+	cachedInputTokens := 0
+	reasoningTokens := 0
+	totalTokens := 0
 	totalTextChars := 0
 	streamStatus := "success"
 	var streamErr string
+	sawDone := false
+	setFailure := func(err error) {
+		streamStatus = "error"
+		if err != nil {
+			streamErr = err.Error()
+		} else if streamErr == "" {
+			streamErr = "stream failed"
+		}
+	}
+	defer func() {
+		if outTokens == 0 {
+			outTokens = session.EstimateTokens(strings.Repeat("a", totalTextChars))
+		}
+		if inTokens == 0 {
+			inTokens = estInTokens
+		}
+		if totalTokens == 0 {
+			totalTokens = inTokens + outTokens
+		}
+		if tr != nil {
+			tr.SetTokens(inTokens, outTokens)
+			tr.MarkStreamDone()
+		}
+		if sess != nil && h.sessions != nil {
+			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider:             prov,
+				Model:                trackingModel,
+				Stream:               true,
+				DurationMs:           time.Since(startTime).Milliseconds(),
+				GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+				InputTokens:          inTokens,
+				InputTokensEstimated: inputEstimated,
+				OutputTokens:         outTokens,
+				CachedInputTokens:    cachedInputTokens,
+				ReasoningTokens:      reasoningTokens,
+				TotalTokens:          totalTokens,
+				Status:               streamStatus,
+				ErrorMessage:         streamErr,
+			})
+		}
+	}()
 
-	closeActiveBlock := func() {
+	write := func(eventType string, data any) bool {
+		if err := stream.event(eventType, data); err != nil {
+			setFailure(fmt.Errorf("downstream SSE %s: %w", eventType, err))
+			cancel()
+			return false
+		}
+		return true
+	}
+	closeActiveBlock := func() bool {
 		if activeBlockType != "" {
-			sendSSE("content_block_stop", map[string]any{
+			if !write("content_block_stop", map[string]any{
 				"type":  "content_block_stop",
 				"index": currentBlockIndex,
-			})
+			}) {
+				return false
+			}
 			currentBlockIndex++
 			activeBlockType = ""
 		}
+		return true
 	}
 
-	tr := trace.FromContext(r.Context())
+	if err := stream.flush(); err != nil {
+		setFailure(fmt.Errorf("downstream initial flush: %w", err))
+		return
+	}
+	if !write("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": messageID, "type": "message", "role": "assistant", "model": modelName, "content": []any{},
+			"usage": map[string]any{"input_tokens": estInTokens, "output_tokens": 0},
+		},
+	}) {
+		return
+	}
+
 	for ev := range completeToolStream(ctx, eventsChan) {
 		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
 			tr.MarkFirstToken()
 		}
 		if ev.CandidateIndex != 0 {
-			sendSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": "Anthropic output supports only candidate zero"}})
+			err := errors.New("Anthropic output supports only candidate zero")
+			setFailure(err)
+			_ = stream.event("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": err.Error()}})
+			cancel()
 			return
 		}
 		if ev.Type == canonical.EventError {
-			streamStatus = "error"
 			translatedErr := ev.Error
 			if translatedErr == nil {
 				translatedErr = errors.New("upstream stream error")
 			}
-			streamErr = translatedErr.Error()
+			setFailure(translatedErr)
 			_, errorType, message := anthropicError(translatedErr)
-			sendSSE("error", map[string]any{
+			_ = stream.event("error", map[string]any{
 				"type": "error",
 				"error": map[string]any{
 					"type":    errorType,
 					"message": message,
 				},
 			})
+			cancel()
 			return
 		}
 
@@ -637,59 +692,79 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		case canonical.EventThinkingDelta:
 			totalTextChars += len(ev.Thinking)
 			if activeBlockType != "thinking" {
-				closeActiveBlock()
+				if !closeActiveBlock() {
+					return
+				}
 				activeBlockType = "thinking"
-				sendSSE("content_block_start", map[string]any{
+				if !write("content_block_start", map[string]any{
 					"type":  "content_block_start",
 					"index": currentBlockIndex,
 					"content_block": map[string]any{
 						"type":     "thinking",
 						"thinking": "",
 					},
-				})
+				}) {
+					return
+				}
 			}
-			sendSSE("content_block_delta", map[string]any{
+			if !write("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
 				"index": currentBlockIndex,
 				"delta": map[string]any{
 					"type":     "thinking_delta",
 					"thinking": ev.Thinking,
 				},
-			})
+			}) {
+				return
+			}
 
 		case canonical.EventTextDelta:
 			totalTextChars += len(ev.Text)
 			if activeBlockType != "text" {
-				closeActiveBlock()
+				if !closeActiveBlock() {
+					return
+				}
 				activeBlockType = "text"
-				sendSSE("content_block_start", map[string]any{
+				if !write("content_block_start", map[string]any{
 					"type":  "content_block_start",
 					"index": currentBlockIndex,
 					"content_block": map[string]any{
 						"type": "text",
 						"text": "",
 					},
-				})
+				}) {
+					return
+				}
 			}
-			sendSSE("content_block_delta", map[string]any{
+			if !write("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
 				"index": currentBlockIndex,
 				"delta": map[string]any{
 					"type": "text_delta",
 					"text": ev.Text,
 				},
-			})
+			}) {
+				return
+			}
 
 		case canonical.EventToolCallDone:
-			closeActiveBlock()
+			if !closeActiveBlock() {
+				return
+			}
 			stopReason = "tool_use"
-			sendSSE("content_block_start", map[string]any{
+			if !write("content_block_start", map[string]any{
 				"type": "content_block_start", "index": currentBlockIndex,
 				"content_block": map[string]any{"type": "tool_use", "id": ev.ToolCallID, "name": ev.ToolCallName, "input": map[string]any{}},
-			})
+			}) {
+				return
+			}
 			totalTextChars += len(ev.ToolCallArgs)
-			sendSSE("content_block_delta", map[string]any{"type": "content_block_delta", "index": currentBlockIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": ev.ToolCallArgs}})
-			sendSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": currentBlockIndex})
+			if !write("content_block_delta", map[string]any{"type": "content_block_delta", "index": currentBlockIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": ev.ToolCallArgs}}) {
+				return
+			}
+			if !write("content_block_stop", map[string]any{"type": "content_block_stop", "index": currentBlockIndex}) {
+				return
+			}
 			currentBlockIndex++
 
 		case canonical.EventMessageDelta:
@@ -698,7 +773,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 					stopReason = "tool_use"
 				} else if ev.FinishReason == "length" {
 					stopReason = "max_tokens"
-				} else {
+				} else if stopReason != "tool_use" {
 					stopReason = "end_turn"
 				}
 			}
@@ -710,15 +785,29 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
 				}
+				cachedInputTokens = ev.Usage.CacheReadInputTokens
+				reasoningTokens = ev.Usage.ReasoningTokens
+				if ev.Usage.TotalTokens > 0 {
+					totalTokens = ev.Usage.TotalTokens
+				}
 			}
 
 		case canonical.EventMessageDone:
-			closeActiveBlock()
+			sawDone = true
+			if !closeActiveBlock() {
+				return
+			}
 		}
 	}
-
-	closeActiveBlock()
-
+	if !sawDone {
+		if r.Context().Err() != nil {
+			setFailure(r.Context().Err())
+		} else {
+			setFailure(io.ErrUnexpectedEOF)
+			_ = stream.event("error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": streamErr}})
+		}
+		return
+	}
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(strings.Repeat("a", totalTextChars))
 	}
@@ -726,8 +815,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 		inTokens = estInTokens
 	}
 
-	// Final message_delta & message_stop
-	sendSSE("message_delta", map[string]any{
+	if !write("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   stopReason,
@@ -739,30 +827,13 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			"input_tokens":  inTokens,
 			"output_tokens": outTokens,
 		},
-	})
-	sendSSE("message_stop", map[string]any{
-		"type": "message_stop",
-	})
-
-	if tr != nil {
-		tr.SetTokens(inTokens, outTokens)
-		tr.MarkStreamDone()
+	}) {
+		return
 	}
-
-	if sess != nil && h.sessions != nil {
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:             prov,
-			Model:                trackingModel,
-			Stream:               true,
-			DurationMs:           time.Since(startTime).Milliseconds(),
-			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-			InputTokens:          inTokens,
-			InputTokensEstimated: inputEstimated,
-			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
-			Status:               streamStatus,
-			ErrorMessage:         streamErr,
-		})
+	if !write("message_stop", map[string]any{
+		"type": "message_stop",
+	}) {
+		return
 	}
 }
 

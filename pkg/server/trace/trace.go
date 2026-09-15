@@ -77,6 +77,18 @@ func (t *RequestTrace) SetRoute(reqModel, provider, destination, targetModel str
 	t.TargetModel = targetModel
 }
 
+// RouteInfo returns the route currently associated with the request. The
+// router updates it when a fallback is selected, so callers can attribute
+// telemetry to the provider that actually executed.
+func (t *RequestTrace) RouteInfo() (provider, destination, targetModel string) {
+	if t == nil {
+		return "", "", ""
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.Provider, t.Destination, t.TargetModel
+}
+
 // SetReadDuration records the time spent reading the request body from the client.
 func (t *RequestTrace) SetReadDuration(d time.Duration) {
 	if t == nil {

@@ -22,13 +22,16 @@ type ServerConfig struct {
 
 // ProviderConfig defines configuration for an upstream LLM provider.
 type ProviderConfig struct {
-	Type          string   `yaml:"type"`              // "openai", "anthropic", "google", "copilot"
-	Enabled       *bool    `yaml:"enabled,omitempty"` // nil preserves backward compatibility and means enabled
-	APIKey        string   `yaml:"api_key"`
-	BaseURL       string   `yaml:"base_url"`
-	EnabledModels []string `yaml:"enabled_models"`
-	DefaultModel  string   `yaml:"default_model"`
-	Priority      int      `yaml:"priority"` // 1 is highest priority, 2 is second, etc. Defaults to 100 if unset.
+	Type                         string   `yaml:"type"`              // "openai", "anthropic", "google", "copilot"
+	Enabled                      *bool    `yaml:"enabled,omitempty"` // nil preserves backward compatibility and means enabled
+	APIKey                       string   `yaml:"api_key"`
+	BaseURL                      string   `yaml:"base_url"`
+	EnabledModels                []string `yaml:"enabled_models"`
+	DefaultModel                 string   `yaml:"default_model"`
+	Priority                     int      `yaml:"priority"` // 1 is highest priority, 2 is second, etc. Defaults to 100 if unset.
+	ResponseHeaderTimeoutSeconds int      `yaml:"response_header_timeout_seconds,omitempty"`
+	StreamIdleTimeoutSeconds     int      `yaml:"stream_idle_timeout_seconds,omitempty"`
+	GenerationTimeoutSeconds     int      `yaml:"generation_timeout_seconds,omitempty"` // 0 disables an overall deadline
 }
 
 // RoutingConfig defines model aliasing and routing rules.

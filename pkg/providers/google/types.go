@@ -1,13 +1,20 @@
 package google
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/vogler75/babel-gate/pkg/providers/toolnames"
+)
 
 type GenerateContentRequest struct {
 	Model             string            `json:"model,omitempty"`
 	Contents          []Content         `json:"contents"`
 	SystemInstruction *Content          `json:"systemInstruction,omitempty"`
 	Tools             []Tool            `json:"tools,omitempty"`
+	ToolConfig        *ToolConfig       `json:"toolConfig,omitempty"`
 	GenerationConfig  *GenerationConfig `json:"generationConfig,omitempty"`
+	names             *toolnames.Mapping
+	signatureScope    string
 }
 
 type CountTokensRequest struct {
@@ -37,21 +44,24 @@ type Part struct {
 	FunctionCall     *FunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *FunctionResponse `json:"functionResponse,omitempty"`
 	Thought          bool              `json:"thought,omitempty"`
-	ThoughtSignature string            `json:"thought_signature,omitempty"`
+	ThoughtSignature string            `json:"thoughtSignature,omitempty"`
 }
 
 func (p *Part) UnmarshalJSON(data []byte) error {
 	type Alias Part
-	var aux struct {
-		Alias
-		CamelThoughtSignature string `json:"thoughtSignature,omitempty"`
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
 		return err
 	}
-	*p = Part(aux.Alias)
-	if p.ThoughtSignature == "" && aux.CamelThoughtSignature != "" {
-		p.ThoughtSignature = aux.CamelThoughtSignature
+	*p = Part(alias)
+	if p.ThoughtSignature == "" {
+		var legacy struct {
+			ThoughtSignature string `json:"thought_signature,omitempty"`
+		}
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return err
+		}
+		p.ThoughtSignature = legacy.ThoughtSignature
 	}
 	return nil
 }
@@ -78,6 +88,15 @@ type Tool struct {
 	FunctionDeclarations []FunctionDeclaration `json:"functionDeclarations,omitempty"`
 }
 
+type ToolConfig struct {
+	FunctionCallingConfig FunctionCallingConfig `json:"functionCallingConfig"`
+}
+
+type FunctionCallingConfig struct {
+	Mode                 string   `json:"mode"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
+}
+
 type FunctionDeclaration struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
@@ -85,28 +104,52 @@ type FunctionDeclaration struct {
 }
 
 type GenerationConfig struct {
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"topP,omitempty"`
-	TopK            *int     `json:"topK,omitempty"`
-	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
-	StopSequences   []string `json:"stopSequences,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"topP,omitempty"`
+	TopK            *int            `json:"topK,omitempty"`
+	MaxOutputTokens *int            `json:"maxOutputTokens,omitempty"`
+	StopSequences   []string        `json:"stopSequences,omitempty"`
+	ThinkingConfig  *ThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type ThinkingConfig struct {
+	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
 }
 
 type GenerateContentResponse struct {
-	Candidates    []Candidate    `json:"candidates"`
-	UsageMetadata *UsageMetadata `json:"usageMetadata,omitempty"`
+	Candidates     []Candidate     `json:"candidates"`
+	UsageMetadata  *UsageMetadata  `json:"usageMetadata,omitempty"`
+	PromptFeedback *PromptFeedback `json:"promptFeedback,omitempty"`
 }
 
 type Candidate struct {
-	Content      Content `json:"content"`
-	FinishReason string  `json:"finishReason,omitempty"`
-	Index        int     `json:"index,omitempty"`
+	Content       Content        `json:"content"`
+	FinishReason  string         `json:"finishReason,omitempty"`
+	FinishMessage string         `json:"finishMessage,omitempty"`
+	Index         int            `json:"index,omitempty"`
+	SafetyRatings []SafetyRating `json:"safetyRatings,omitempty"`
+}
+
+type PromptFeedback struct {
+	BlockReason        string         `json:"blockReason,omitempty"`
+	BlockReasonMessage string         `json:"blockReasonMessage,omitempty"`
+	SafetyRatings      []SafetyRating `json:"safetyRatings,omitempty"`
+}
+
+type SafetyRating struct {
+	Category    string `json:"category,omitempty"`
+	Probability string `json:"probability,omitempty"`
+	Blocked     bool   `json:"blocked,omitempty"`
 }
 
 type UsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
 }
 
 type ModelListResponse struct {

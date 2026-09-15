@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/config"
@@ -66,7 +67,11 @@ func buildProvider(name string, pcfg config.ProviderConfig) (providers.Provider,
 	case "anthropic":
 		return anthropic.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
 	case "google":
-		return google.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
+		return google.NewClientWithTimeouts(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil, google.Timeouts{
+			ResponseHeader: time.Duration(pcfg.ResponseHeaderTimeoutSeconds) * time.Second,
+			StreamIdle:     time.Duration(pcfg.StreamIdleTimeoutSeconds) * time.Second,
+			Generation:     time.Duration(pcfg.GenerationTimeoutSeconds) * time.Second,
+		}), nil
 	case "copilot", "github-copilot":
 		return copilot.NewClient(name, pcfg.APIKey, pcfg.BaseURL, pcfg.EnabledModels, nil), nil
 	default:

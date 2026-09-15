@@ -108,10 +108,15 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      handler,
-		ReadTimeout:  time.Duration(cfg.Server.TimeoutSeconds) * time.Second,
-		WriteTimeout: time.Duration(cfg.Server.TimeoutSeconds) * time.Second,
+		Addr:        addr,
+		Handler:     handler,
+		ReadTimeout: time.Duration(cfg.Server.TimeoutSeconds) * time.Second,
+		// Streaming responses can legitimately remain active for minutes. An
+		// absolute server WriteTimeout would make the client socket unwritable
+		// while the upstream provider continues generating. Provider-specific
+		// response-header, idle, and optional generation timeouts bound upstream
+		// work instead.
+		WriteTimeout: 0,
 	}
 
 	return &Server{
@@ -178,9 +183,14 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 }
 
 func (w *statusWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
+	_ = w.FlushError()
+}
+
+func (w *statusWriter) FlushError() error {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
 	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {

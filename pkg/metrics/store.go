@@ -17,46 +17,54 @@ const maxPlausibleTokensPerSecond = 1000.0
 
 // ModelMetric captures aggregated counters for a specific model within a bucket.
 type ModelMetric struct {
-	Model        string `json:"model"`
-	Provider     string `json:"provider"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
-	Requests     int64  `json:"requests"`
-	Errors       int64  `json:"errors"`
+	Model             string `json:"model"`
+	Provider          string `json:"provider"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CachedInputTokens int64  `json:"cached_input_tokens"`
+	ReasoningTokens   int64  `json:"reasoning_tokens"`
+	TotalTokens       int64  `json:"total_tokens"`
+	Requests          int64  `json:"requests"`
+	Errors            int64  `json:"errors"`
 }
 
 // ProviderMetric captures aggregated counters for a provider within a bucket.
 type ProviderMetric struct {
-	Provider     string `json:"provider"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
-	Requests     int64  `json:"requests"`
-	Errors       int64  `json:"errors"`
+	Provider          string `json:"provider"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CachedInputTokens int64  `json:"cached_input_tokens"`
+	ReasoningTokens   int64  `json:"reasoning_tokens"`
+	TotalTokens       int64  `json:"total_tokens"`
+	Requests          int64  `json:"requests"`
+	Errors            int64  `json:"errors"`
 }
 
 // DailyMetricBucket contains metrics aggregated for a single day.
 type DailyMetricBucket struct {
-	Date         string        `json:"date"` // YYYY-MM-DD
-	TotalTokens  int64         `json:"total_tokens"`
-	InputTokens  int64         `json:"input_tokens"`
-	OutputTokens int64         `json:"output_tokens"`
-	Requests     int64         `json:"requests"`
-	Errors       int64         `json:"errors"`
-	Models       []ModelMetric `json:"models"` // Sorted by TotalTokens desc
+	Date              string        `json:"date"` // YYYY-MM-DD
+	TotalTokens       int64         `json:"total_tokens"`
+	InputTokens       int64         `json:"input_tokens"`
+	OutputTokens      int64         `json:"output_tokens"`
+	CachedInputTokens int64         `json:"cached_input_tokens"`
+	ReasoningTokens   int64         `json:"reasoning_tokens"`
+	Requests          int64         `json:"requests"`
+	Errors            int64         `json:"errors"`
+	Models            []ModelMetric `json:"models"` // Sorted by TotalTokens desc
 }
 
 // HourlyMetricBucket contains metrics aggregated for a single hour.
 type HourlyMetricBucket struct {
-	Hour         string        `json:"hour"`      // "00" through "23"
-	Timestamp    string        `json:"timestamp"` // ISO8601 UTC: YYYY-MM-DDTHH:00:00Z
-	TotalTokens  int64         `json:"total_tokens"`
-	InputTokens  int64         `json:"input_tokens"`
-	OutputTokens int64         `json:"output_tokens"`
-	Requests     int64         `json:"requests"`
-	Errors       int64         `json:"errors"`
-	Models       []ModelMetric `json:"models"` // Sorted by TotalTokens desc
+	Hour              string        `json:"hour"`      // "00" through "23"
+	Timestamp         string        `json:"timestamp"` // ISO8601 UTC: YYYY-MM-DDTHH:00:00Z
+	TotalTokens       int64         `json:"total_tokens"`
+	InputTokens       int64         `json:"input_tokens"`
+	OutputTokens      int64         `json:"output_tokens"`
+	CachedInputTokens int64         `json:"cached_input_tokens"`
+	ReasoningTokens   int64         `json:"reasoning_tokens"`
+	Requests          int64         `json:"requests"`
+	Errors            int64         `json:"errors"`
+	Models            []ModelMetric `json:"models"` // Sorted by TotalTokens desc
 }
 
 // MetricsSummary contains overall totals and top lists for a time range.
@@ -64,6 +72,8 @@ type MetricsSummary struct {
 	TotalTokens        int64            `json:"total_tokens"`
 	InputTokens        int64            `json:"input_tokens"`
 	OutputTokens       int64            `json:"output_tokens"`
+	CachedInputTokens  int64            `json:"cached_input_tokens"`
+	ReasoningTokens    int64            `json:"reasoning_tokens"`
 	Requests           int64            `json:"requests"`
 	Errors             int64            `json:"errors"`
 	TopModels          []ModelMetric    `json:"top_models"`
@@ -161,6 +171,8 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		requests INTEGER NOT NULL DEFAULT 0,
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
 		errors INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (hour_timestamp, provider, model)
@@ -182,6 +194,8 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		context_tokens_estimated INTEGER NOT NULL DEFAULT 0,
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
 		tokens_per_second REAL NOT NULL DEFAULT 0.0,
 		generation_duration_ms INTEGER NOT NULL DEFAULT 0,
@@ -203,6 +217,8 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		input_tokens_estimated INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
 		tokens_per_second REAL NOT NULL DEFAULT 0.0,
 		status TEXT NOT NULL DEFAULT 'success',
@@ -220,6 +236,12 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 	for _, alter := range []string{
 		"ALTER TABLE sessions ADD COLUMN last_model TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE sessions ADD COLUMN model_stats TEXT NOT NULL DEFAULT '{}';",
+		"ALTER TABLE hourly_metrics ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE hourly_metrics ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE session_requests ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE session_requests ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE sessions ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE sessions ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
 	} {
 		_, _ = db.Exec(alter)
 	}
@@ -248,6 +270,10 @@ func (s *Store) Close() error {
 
 // Record increments the hourly counters for the given provider and model.
 func (s *Store) Record(t time.Time, provider, model string, inTokens, outTokens, totalTokens int, isError bool) error {
+	return s.RecordDetailed(t, provider, model, inTokens, outTokens, totalTokens, 0, 0, isError)
+}
+
+func (s *Store) RecordDetailed(t time.Time, provider, model string, inTokens, outTokens, totalTokens, cachedInputTokens, reasoningTokens int, isError bool) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -274,12 +300,14 @@ func (s *Store) Record(t time.Time, provider, model string, inTokens, outTokens,
 	}
 
 	query := `
-	INSERT INTO hourly_metrics (hour_timestamp, provider, model, requests, input_tokens, output_tokens, total_tokens, errors)
-	VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+	INSERT INTO hourly_metrics (hour_timestamp, provider, model, requests, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, errors)
+	VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(hour_timestamp, provider, model) DO UPDATE SET
 		requests = requests + 1,
 		input_tokens = input_tokens + excluded.input_tokens,
 		output_tokens = output_tokens + excluded.output_tokens,
+		cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
+		reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
 		total_tokens = total_tokens + excluded.total_tokens,
 		errors = errors + excluded.errors;
 	`
@@ -287,7 +315,7 @@ func (s *Store) Record(t time.Time, provider, model string, inTokens, outTokens,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(query, hourTimestamp, provider, model, inTokens, outTokens, totalTokens, errCount)
+	_, err := s.db.Exec(query, hourTimestamp, provider, model, inTokens, outTokens, cachedInputTokens, reasoningTokens, totalTokens, errCount)
 	return err
 }
 
@@ -322,11 +350,11 @@ func (s *Store) GetDailyMetrics(start, end time.Time, providerFilter string) ([]
 	defer s.mu.RUnlock()
 
 	startStr := start.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
-	endStr := end.UTC().Truncate(24*time.Hour).Add(24*time.Hour - time.Nanosecond).Format(time.RFC3339)
+	endStr := end.UTC().Truncate(24 * time.Hour).Add(24*time.Hour - time.Nanosecond).Format(time.RFC3339)
 
 	query := `
 	SELECT substr(hour_timestamp, 1, 10) AS day_str, provider, model,
-	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(errors)
+	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens), SUM(reasoning_tokens), SUM(total_tokens), SUM(errors)
 	FROM hourly_metrics
 	WHERE hour_timestamp >= ? AND hour_timestamp <= ?
 	`
@@ -364,10 +392,10 @@ func (s *Store) GetDailyMetrics(start, end time.Time, providerFilter string) ([]
 
 	for rows.Next() {
 		var (
-			dayStr, prov, mod string
-			reqs, inTok, outTok, totTok, errs int64
+			dayStr, prov, mod                                          string
+			reqs, inTok, outTok, cachedTok, reasoningTok, totTok, errs int64
 		)
-		if err := rows.Scan(&dayStr, &prov, &mod, &reqs, &inTok, &outTok, &totTok, &errs); err != nil {
+		if err := rows.Scan(&dayStr, &prov, &mod, &reqs, &inTok, &outTok, &cachedTok, &reasoningTok, &totTok, &errs); err != nil {
 			return nil, fmt.Errorf("scanning daily row: %w", err)
 		}
 
@@ -384,17 +412,21 @@ func (s *Store) GetDailyMetrics(start, end time.Time, providerFilter string) ([]
 		bucket.Requests += reqs
 		bucket.InputTokens += inTok
 		bucket.OutputTokens += outTok
+		bucket.CachedInputTokens += cachedTok
+		bucket.ReasoningTokens += reasoningTok
 		bucket.TotalTokens += totTok
 		bucket.Errors += errs
 
 		bucket.Models = append(bucket.Models, ModelMetric{
-			Model:        mod,
-			Provider:     prov,
-			InputTokens:  inTok,
-			OutputTokens: outTok,
-			TotalTokens:  totTok,
-			Requests:     reqs,
-			Errors:       errs,
+			Model:             mod,
+			Provider:          prov,
+			InputTokens:       inTok,
+			OutputTokens:      outTok,
+			CachedInputTokens: cachedTok,
+			ReasoningTokens:   reasoningTok,
+			TotalTokens:       totTok,
+			Requests:          reqs,
+			Errors:            errs,
 		})
 	}
 
@@ -428,7 +460,7 @@ func (s *Store) GetHourlyMetrics(day time.Time, providerFilter string) ([]Hourly
 
 	query := `
 	SELECT hour_timestamp, provider, model,
-	       requests, input_tokens, output_tokens, total_tokens, errors
+	       requests, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, errors
 	FROM hourly_metrics
 	WHERE hour_timestamp >= ? AND hour_timestamp < ?
 	`
@@ -464,10 +496,10 @@ func (s *Store) GetHourlyMetrics(day time.Time, providerFilter string) ([]Hourly
 
 	for rows.Next() {
 		var (
-			hourTs, prov, mod string
-			reqs, inTok, outTok, totTok, errs int64
+			hourTs, prov, mod                                          string
+			reqs, inTok, outTok, cachedTok, reasoningTok, totTok, errs int64
 		)
-		if err := rows.Scan(&hourTs, &prov, &mod, &reqs, &inTok, &outTok, &totTok, &errs); err != nil {
+		if err := rows.Scan(&hourTs, &prov, &mod, &reqs, &inTok, &outTok, &cachedTok, &reasoningTok, &totTok, &errs); err != nil {
 			return nil, fmt.Errorf("scanning hourly row: %w", err)
 		}
 
@@ -486,17 +518,21 @@ func (s *Store) GetHourlyMetrics(day time.Time, providerFilter string) ([]Hourly
 			bucket.Requests += reqs
 			bucket.InputTokens += inTok
 			bucket.OutputTokens += outTok
+			bucket.CachedInputTokens += cachedTok
+			bucket.ReasoningTokens += reasoningTok
 			bucket.TotalTokens += totTok
 			bucket.Errors += errs
 
 			bucket.Models = append(bucket.Models, ModelMetric{
-				Model:        mod,
-				Provider:     prov,
-				InputTokens:  inTok,
-				OutputTokens: outTok,
-				TotalTokens:  totTok,
-				Requests:     reqs,
-				Errors:       errs,
+				Model:             mod,
+				Provider:          prov,
+				InputTokens:       inTok,
+				OutputTokens:      outTok,
+				CachedInputTokens: cachedTok,
+				ReasoningTokens:   reasoningTok,
+				TotalTokens:       totTok,
+				Requests:          reqs,
+				Errors:            errs,
 			})
 		}
 	}
@@ -521,7 +557,7 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 	defer s.mu.RUnlock()
 
 	startStr := start.UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
-	endStr := end.UTC().Truncate(24*time.Hour).Add(24*time.Hour - time.Nanosecond).Format(time.RFC3339)
+	endStr := end.UTC().Truncate(24 * time.Hour).Add(24*time.Hour - time.Nanosecond).Format(time.RFC3339)
 
 	summary := &MetricsSummary{
 		StartDate:          startStr[:10],
@@ -535,7 +571,8 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 	// 1. Overall totals
 	totQuery := `
 	SELECT COALESCE(SUM(requests), 0), COALESCE(SUM(input_tokens), 0),
-	       COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0),
+	       COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+	       COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(total_tokens), 0),
 	       COALESCE(SUM(errors), 0)
 	FROM hourly_metrics
 	WHERE hour_timestamp >= ? AND hour_timestamp <= ?
@@ -547,12 +584,12 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 	}
 
 	row := s.db.QueryRow(totQuery, totArgs...)
-	_ = row.Scan(&summary.Requests, &summary.InputTokens, &summary.OutputTokens, &summary.TotalTokens, &summary.Errors)
+	_ = row.Scan(&summary.Requests, &summary.InputTokens, &summary.OutputTokens, &summary.CachedInputTokens, &summary.ReasoningTokens, &summary.TotalTokens, &summary.Errors)
 
 	// 2. Models breakdown
 	modQuery := `
 	SELECT model, provider,
-	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(errors)
+	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens), SUM(reasoning_tokens), SUM(total_tokens), SUM(errors)
 	FROM hourly_metrics
 	WHERE hour_timestamp >= ? AND hour_timestamp <= ?
 	`
@@ -568,7 +605,7 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 		defer modRows.Close()
 		for modRows.Next() {
 			var mm ModelMetric
-			if err := modRows.Scan(&mm.Model, &mm.Provider, &mm.Requests, &mm.InputTokens, &mm.OutputTokens, &mm.TotalTokens, &mm.Errors); err == nil {
+			if err := modRows.Scan(&mm.Model, &mm.Provider, &mm.Requests, &mm.InputTokens, &mm.OutputTokens, &mm.CachedInputTokens, &mm.ReasoningTokens, &mm.TotalTokens, &mm.Errors); err == nil {
 				summary.TopModels = append(summary.TopModels, mm)
 			}
 		}
@@ -577,7 +614,7 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 	// 3. Providers breakdown
 	provQuery := `
 	SELECT provider,
-	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(errors)
+	       SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens), SUM(reasoning_tokens), SUM(total_tokens), SUM(errors)
 	FROM hourly_metrics
 	WHERE hour_timestamp >= ? AND hour_timestamp <= ?
 	GROUP BY provider ORDER BY SUM(total_tokens) DESC
@@ -587,7 +624,7 @@ func (s *Store) GetSummary(start, end time.Time, providerFilter string) (*Metric
 		defer provRows.Close()
 		for provRows.Next() {
 			var pm ProviderMetric
-			if err := provRows.Scan(&pm.Provider, &pm.Requests, &pm.InputTokens, &pm.OutputTokens, &pm.TotalTokens, &pm.Errors); err == nil {
+			if err := provRows.Scan(&pm.Provider, &pm.Requests, &pm.InputTokens, &pm.OutputTokens, &pm.CachedInputTokens, &pm.ReasoningTokens, &pm.TotalTokens, &pm.Errors); err == nil {
 				summary.TopProviders = append(summary.TopProviders, pm)
 			}
 		}
@@ -790,4 +827,3 @@ func (s *Store) GetModelSpeedMetrics(start, end time.Time, granularity, provider
 
 	return resp, nil
 }
-

@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -774,6 +777,138 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 	if !strings.Contains(logged, "sess: test-session…") {
 		t.Errorf("expected log to contain truncated session ID, got: %s", logged)
+	}
+}
+
+type responseControllerFlushErrorWriter struct {
+	header http.Header
+	err    error
+}
+
+type delayedHealthyStreamProvider struct{}
+
+func (p *delayedHealthyStreamProvider) Name() string     { return "google" }
+func (p *delayedHealthyStreamProvider) Type() string     { return "google" }
+func (p *delayedHealthyStreamProvider) Endpoint() string { return "http://healthy-stream.test" }
+func (p *delayedHealthyStreamProvider) Execute(context.Context, *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
+	return nil, errors.New("not implemented")
+}
+func (p *delayedHealthyStreamProvider) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
+	ch := make(chan canonical.CanonicalEvent)
+	go func() {
+		defer close(ch)
+		for _, item := range []struct {
+			delay time.Duration
+			ev    canonical.CanonicalEvent
+		}{
+			{0, canonical.CanonicalEvent{Type: canonical.EventTextDelta, Text: "first"}},
+			{1250 * time.Millisecond, canonical.CanonicalEvent{Type: canonical.EventTextDelta, Text: "last"}},
+			{0, canonical.CanonicalEvent{Type: canonical.EventMessageDelta, FinishReason: "stop"}},
+			{0, canonical.CanonicalEvent{Type: canonical.EventMessageDone}},
+		} {
+			if item.delay > 0 {
+				timer := time.NewTimer(item.delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- item.ev:
+			}
+		}
+	}()
+	return ch, nil
+}
+func (p *delayedHealthyStreamProvider) ListModels(context.Context) ([]providers.ModelInfo, error) {
+	return []providers.ModelInfo{{ID: "gemini-test", Provider: "google"}}, nil
+}
+
+func (w *responseControllerFlushErrorWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+func (w *responseControllerFlushErrorWriter) WriteHeader(int)             {}
+func (w *responseControllerFlushErrorWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *responseControllerFlushErrorWriter) FlushError() error           { return w.err }
+
+func TestIssue2StatusWriterPreservesFlushErrors(t *testing.T) {
+	want := errors.New("socket flush failed")
+	sw := &statusWriter{ResponseWriter: &responseControllerFlushErrorWriter{err: want}}
+	if err := http.NewResponseController(sw).Flush(); !errors.Is(err, want) {
+		t.Fatalf("expected underlying flush error, got %v", err)
+	}
+}
+
+func TestIssue2ServerHasNoAbsoluteWriteDeadline(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, TimeoutSeconds: 1},
+		Providers: map[string]config.ProviderConfig{},
+		Routing:   config.RoutingConfig{Routes: map[string]string{}, Fallbacks: map[string][]string{}},
+		Database:  config.DatabaseConfig{Path: filepath.Join(t.TempDir(), "metrics.db")},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(cfg, engine)
+	defer srv.Metrics().Close()
+	if srv.httpServer.WriteTimeout != 0 {
+		t.Fatalf("streaming responses still have an absolute write timeout: %v", srv.httpServer.WriteTimeout)
+	}
+	if srv.httpServer.ReadTimeout != time.Second {
+		t.Fatalf("request read timeout was not retained: %v", srv.httpServer.ReadTimeout)
+	}
+}
+
+func TestIssue2HealthyStreamOutlivesConfiguredRequestTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Port: 8080, TimeoutSeconds: 1},
+		Providers: map[string]config.ProviderConfig{},
+		Routing:   config.RoutingConfig{Routes: map[string]string{}, Fallbacks: map[string][]string{}},
+		Database:  config.DatabaseConfig{Path: filepath.Join(t.TempDir(), "metrics.db")},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.RegisterProvider(&delayedHealthyStreamProvider{})
+	srv := NewServer(cfg, engine)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.httpServer.Serve(listener) }()
+	defer func() {
+		_ = srv.Shutdown(context.Background())
+		<-serveDone
+	}()
+
+	body := strings.NewReader(`{"model":"gemini-test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/v1/messages", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("healthy stream failed after the configured one-second timeout: %v", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(responseBody), "last") || !strings.Contains(string(responseBody), "message_stop") {
+		t.Fatalf("healthy long stream was truncated: %s", responseBody)
 	}
 }
 

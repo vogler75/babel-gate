@@ -102,3 +102,19 @@ func TestAutoPopulateFromEnv(t *testing.T) {
 		t.Errorf("expected google key sk-gemini, got %s", cfg.Providers["google"].APIKey)
 	}
 }
+
+func TestIssue2GoogleTimeoutConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "providers:\n  google:\n    type: google\n    response_header_timeout_seconds: 11\n    stream_idle_timeout_seconds: 22\n    generation_timeout_seconds: 33\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	google := cfg.Providers["google"]
+	if google.ResponseHeaderTimeoutSeconds != 11 || google.StreamIdleTimeoutSeconds != 22 || google.GenerationTimeoutSeconds != 33 {
+		t.Fatalf("timeout settings were not loaded independently: %+v", google)
+	}
+}

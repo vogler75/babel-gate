@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -76,6 +77,9 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	}
 
 	sess := ResolveSession(h.sessions, r)
+	if sess != nil {
+		canonReq.SessionID = sess.ID
+	}
 	estInTokens := session.EstimateRequestTokens(canonReq)
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
 
@@ -102,6 +106,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	inTokens := resp.Usage.PromptTokens
 	inputEstimated := inTokens == 0
@@ -111,6 +116,10 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	outTokens := resp.Usage.CompletionTokens
 	if outTokens == 0 {
 		outTokens = session.EstimateTokens(resp.Message.TextContent())
+	}
+	totalTokens := resp.Usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = inTokens + outTokens
 	}
 
 	if tr != nil {
@@ -126,7 +135,9 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 			InputTokens:          inTokens,
 			InputTokensEstimated: inputEstimated,
 			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
+			CachedInputTokens:    resp.Usage.CacheReadInputTokens,
+			ReasoningTokens:      resp.Usage.ReasoningTokens,
+			TotalTokens:          totalTokens,
 			Status:               "success",
 		})
 	}
@@ -175,19 +186,20 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 	}
 
 	sess := ResolveSession(h.sessions, r)
+	if sess != nil {
+		canonReq.SessionID = sess.ID
+	}
 	estInTokens := session.EstimateRequestTokens(canonReq)
 	prov, trackingModel := h.engine.ResolveTrackingModel(canonReq.Model)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	eventsChan, err := h.engine.Stream(ctx, canonReq)
 	if err != nil {
+		if tr != nil {
+			tr.SetTokens(estInTokens, 0)
+			tr.MarkStreamDone()
+		}
 		if sess != nil && h.sessions != nil {
 			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
 				Provider:             prov,
@@ -204,29 +216,74 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
 		return
 	}
+	prov, trackingModel = executedTrackingModel(h.engine, tr, canonReq.Model)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	stream := newSSEWriter(w)
 
 	inTokens := estInTokens
 	inputEstimated := true
 	outTokens := 0
+	cachedInputTokens := 0
+	reasoningTokens := 0
+	totalTokens := 0
 	totalChars := 0
 	streamStatus := "success"
 	var streamErr string
+	sawDone := false
+	setFailure := func(err error) {
+		streamStatus = "error"
+		if err != nil {
+			streamErr = err.Error()
+		} else if streamErr == "" {
+			streamErr = "stream failed"
+		}
+	}
+	defer func() {
+		if outTokens == 0 {
+			outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
+		}
+		if inTokens == 0 {
+			inTokens = estInTokens
+		}
+		if totalTokens == 0 {
+			totalTokens = inTokens + outTokens
+		}
+		if tr != nil {
+			tr.SetTokens(inTokens, outTokens)
+			tr.MarkStreamDone()
+		}
+		if sess != nil && h.sessions != nil {
+			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+				Provider: prov, Model: trackingModel, Stream: true,
+				DurationMs: time.Since(startTime).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
+				InputTokens: inTokens, InputTokensEstimated: inputEstimated, OutputTokens: outTokens, CachedInputTokens: cachedInputTokens, ReasoningTokens: reasoningTokens, TotalTokens: totalTokens,
+				Status: streamStatus, ErrorMessage: streamErr,
+			})
+		}
+	}()
+	send := func(data any) bool {
+		if err := stream.data(data); err != nil {
+			setFailure(fmt.Errorf("downstream Google SSE: %w", err))
+			cancel()
+			return false
+		}
+		return true
+	}
+	if err := stream.flush(); err != nil {
+		setFailure(fmt.Errorf("downstream initial flush: %w", err))
+		return
+	}
 
 	for ev := range completeToolStream(ctx, eventsChan) {
 		if tr != nil && !tr.HasFirstToken() && (ev.Thinking != "" || ev.Text != "" || ev.ToolCallName != "" || ev.ToolCallID != "" || ev.Type == canonical.EventThinkingDelta || ev.Type == canonical.EventTextDelta) {
 			tr.MarkFirstToken()
 		}
 		if ev.Type == canonical.EventError {
-			streamStatus = "error"
-			if ev.Error != nil {
-				streamErr = ev.Error.Error()
-			}
+			setFailure(ev.Error)
 			errData := map[string]any{
 				"error": map[string]any{
 					"code":    500,
@@ -234,18 +291,21 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 					"status":  "INTERNAL",
 				},
 			}
-			b, _ := json.Marshal(errData)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-			flusher.Flush()
+			_ = stream.data(errData)
+			cancel()
 			return
 		}
 
 		if ev.Type == canonical.EventThinkingDelta && ev.Thinking != "" {
 			totalChars += len(ev.Thinking)
-			chunk := map[string]any{"candidates": []any{map[string]any{"index": ev.CandidateIndex, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": ev.Thinking, "thought": true}}}}}}
-			b, _ := json.Marshal(chunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-			flusher.Flush()
+			part := map[string]any{"text": ev.Thinking, "thought": true}
+			if ev.ThoughtSignature != "" && (ev.ThoughtSignatureProvider == "" || ev.ThoughtSignatureProvider == "google") {
+				part["thoughtSignature"] = ev.ThoughtSignature
+			}
+			chunk := map[string]any{"candidates": []any{map[string]any{"index": ev.CandidateIndex, "content": map[string]any{"role": "model", "parts": []any{part}}}}}
+			if !send(chunk) {
+				return
+			}
 		}
 		if ev.Type == canonical.EventTextDelta && ev.Text != "" {
 			totalChars += len(ev.Text)
@@ -262,35 +322,47 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 					},
 				},
 			}
-			b, _ := json.Marshal(chunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-			flusher.Flush()
+			if !send(chunk) {
+				return
+			}
 		}
 
 		if ev.Type == canonical.EventToolCallDone {
+			signature := ev.ThoughtSignature
+			switch ev.ThoughtSignatureProvider {
+			case "google":
+				// Preserve an intentional omission on later parallel calls.
+			case "":
+				if signature == "" {
+					signature = "skip_thought_signature_validator"
+				}
+			default:
+				signature = "skip_thought_signature_validator"
+			}
+			part := map[string]any{
+				"functionCall": map[string]any{
+					"id":   ev.ToolCallID,
+					"name": ev.ToolCallName,
+					"args": json.RawMessage(ev.ToolCallArgs),
+				},
+			}
+			if signature != "" {
+				part["thoughtSignature"] = signature
+			}
 			chunk := map[string]any{
 				"candidates": []map[string]any{
 					{
 						"content": map[string]any{
-							"role": "model",
-							"parts": []map[string]any{
-								{
-									"thoughtSignature": ev.ThoughtSignature,
-									"functionCall": map[string]any{
-										"id":   ev.ToolCallID,
-										"name": ev.ToolCallName,
-										"args": json.RawMessage(ev.ToolCallArgs),
-									},
-								},
-							},
+							"role":  "model",
+							"parts": []map[string]any{part},
 						},
 						"index": ev.CandidateIndex,
 					},
 				},
 			}
-			b, _ := json.Marshal(chunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-			flusher.Flush()
+			if !send(chunk) {
+				return
+			}
 		}
 
 		if ev.Type == canonical.EventMessageDelta {
@@ -301,6 +373,17 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 				}
 				if ev.Usage.CompletionTokens > 0 {
 					outTokens = ev.Usage.CompletionTokens
+				}
+				cachedInputTokens = ev.Usage.CacheReadInputTokens
+				reasoningTokens = ev.Usage.ReasoningTokens
+				if ev.Usage.TotalTokens > 0 {
+					totalTokens = ev.Usage.TotalTokens
+				}
+				if !send(map[string]any{"usageMetadata": map[string]any{
+					"promptTokenCount": inTokens, "candidatesTokenCount": outTokens, "totalTokenCount": totalTokens,
+					"cachedContentTokenCount": cachedInputTokens, "thoughtsTokenCount": reasoningTokens,
+				}}) {
+					return
 				}
 			}
 			if ev.FinishReason != "" {
@@ -316,39 +399,23 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 						},
 					},
 				}
-				b, _ := json.Marshal(chunk)
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", string(b))
-				flusher.Flush()
+				if !send(chunk) {
+					return
+				}
 			}
 		}
+		if ev.Type == canonical.EventMessageDone {
+			sawDone = true
+		}
 	}
-
-	if outTokens == 0 {
-		outTokens = session.EstimateTokens(strings.Repeat("a", totalChars))
-	}
-	if inTokens == 0 {
-		inTokens = estInTokens
-	}
-
-	if tr != nil {
-		tr.SetTokens(inTokens, outTokens)
-		tr.MarkStreamDone()
-	}
-
-	if sess != nil && h.sessions != nil {
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
-			Provider:             prov,
-			Model:                trackingModel,
-			Stream:               true,
-			DurationMs:           time.Since(startTime).Milliseconds(),
-			GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
-			InputTokens:          inTokens,
-			InputTokensEstimated: inputEstimated,
-			OutputTokens:         outTokens,
-			TotalTokens:          inTokens + outTokens,
-			Status:               streamStatus,
-			ErrorMessage:         streamErr,
-		})
+	if !sawDone {
+		if r.Context().Err() != nil {
+			setFailure(r.Context().Err())
+		} else {
+			setFailure(io.ErrUnexpectedEOF)
+			_ = stream.data(map[string]any{"error": map[string]any{"code": 500, "message": streamErr, "status": "INTERNAL"}})
+		}
+		return
 	}
 }
 

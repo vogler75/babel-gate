@@ -1,7 +1,6 @@
 package google
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
 	"github.com/vogler75/babel-gate/pkg/providers"
@@ -22,9 +23,32 @@ type Client struct {
 	baseURL       string
 	httpClient    *http.Client
 	enabledModels []string
+	timeouts      Timeouts
 }
 
+type Timeouts struct {
+	ResponseHeader time.Duration
+	StreamIdle     time.Duration
+	Generation     time.Duration
+}
+
+var (
+	ErrResponseHeaderTimeout = errors.New("Google response-header timeout")
+	ErrStreamIdleTimeout     = errors.New("Google stream idle timeout")
+	ErrGenerationTimeout     = errors.New("Google generation timeout")
+)
+
+const (
+	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultStreamIdleTimeout     = 120 * time.Second
+	maxSSEEventBytes             = 16 * 1024 * 1024
+)
+
 func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient *http.Client) *Client {
+	return NewClientWithTimeouts(name, apiKey, baseURL, enabledModels, httpClient, Timeouts{})
+}
+
+func NewClientWithTimeouts(name, apiKey, baseURL string, enabledModels []string, httpClient *http.Client, timeouts Timeouts) *Client {
 	if baseURL == "" {
 		baseURL = "https://generativelanguage.googleapis.com/v1beta"
 	}
@@ -35,12 +59,26 @@ func NewClient(name, apiKey, baseURL string, enabledModels []string, httpClient 
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	if timeouts.ResponseHeader == 0 {
+		timeouts.ResponseHeader = defaultResponseHeaderTimeout
+	} else if timeouts.ResponseHeader < 0 {
+		timeouts.ResponseHeader = 0
+	}
+	if timeouts.StreamIdle == 0 {
+		timeouts.StreamIdle = defaultStreamIdleTimeout
+	} else if timeouts.StreamIdle < 0 {
+		timeouts.StreamIdle = 0
+	}
+	if timeouts.Generation < 0 {
+		timeouts.Generation = 0
+	}
 	return &Client{
 		name:          name,
 		apiKey:        apiKey,
 		baseURL:       baseURL,
 		httpClient:    httpClient,
 		enabledModels: enabledModels,
+		timeouts:      timeouts,
 	}
 }
 
@@ -53,6 +91,13 @@ func (c *Client) cleanModelName(model string) string {
 	model = strings.TrimPrefix(model, "google/")
 	model = strings.TrimPrefix(model, "models/")
 	return model
+}
+
+func (c *Client) signatureScope(sessionID, targetModel string) string {
+	if sessionID == "" {
+		return ""
+	}
+	return c.name + "\x00" + targetModel + "\x00" + sessionID
 }
 
 func (c *Client) getAPIKey(req *canonical.CanonicalRequest) string {
@@ -85,9 +130,87 @@ func (c *Client) apiError(operation string, statusCode int, body []byte) error {
 	}
 }
 
+func (c *Client) requestContext(parent context.Context) (context.Context, context.CancelCauseFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	if c.timeouts.Generation > 0 {
+		timer := time.AfterFunc(c.timeouts.Generation, func() { cancel(ErrGenerationTimeout) })
+		context.AfterFunc(ctx, func() { timer.Stop() })
+	}
+	return ctx, cancel
+}
+
+func (c *Client) doWithResponseHeaderTimeout(ctx context.Context, cancel context.CancelCauseFunc, req *http.Request) (*http.Response, error) {
+	var timer *time.Timer
+	if c.timeouts.ResponseHeader > 0 {
+		timer = time.AfterFunc(c.timeouts.ResponseHeader, func() { cancel(ErrResponseHeaderTimeout) })
+	}
+	resp, err := c.httpClient.Do(req)
+	if timer != nil {
+		timer.Stop()
+	}
+	if err != nil {
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			return nil, cause
+		}
+	}
+	return resp, err
+}
+
+type idleReadCloser struct {
+	body     io.ReadCloser
+	timeout  time.Duration
+	mu       sync.Mutex
+	timer    *time.Timer
+	timedOut bool
+}
+
+func newIdleReadCloser(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	if timeout <= 0 {
+		return body
+	}
+	r := &idleReadCloser{body: body, timeout: timeout}
+	r.timer = time.AfterFunc(timeout, r.expire)
+	return r
+}
+
+func (r *idleReadCloser) expire() {
+	r.mu.Lock()
+	r.timedOut = true
+	r.mu.Unlock()
+	_ = r.body.Close()
+}
+
+func (r *idleReadCloser) Read(p []byte) (int, error) {
+	n, err := r.body.Read(p)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.timedOut {
+		return n, ErrStreamIdleTimeout
+	}
+	if n > 0 {
+		r.timer.Stop()
+		r.timer.Reset(r.timeout)
+	}
+	return n, err
+}
+
+func (r *idleReadCloser) Close() error {
+	r.mu.Lock()
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+	r.mu.Unlock()
+	return r.body.Close()
+}
+
 func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (*canonical.CanonicalResponse, error) {
-	req.Stream = false
-	targetModel := c.cleanModelName(req.Model)
+	targetReq := *req
+	targetReq.Stream = false
+	targetModel := c.cleanModelName(targetReq.Model)
+	targetReq.SessionID = c.signatureScope(targetReq.SessionID, targetModel)
+	req = &targetReq
+	requestCtx, cancel := c.requestContext(ctx)
+	defer cancel(nil)
 
 	googleReq, err := ToGoogleRequest(req)
 	if err != nil {
@@ -100,7 +223,7 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 	}
 
 	url := fmt.Sprintf("%s/models/%s:generateContent", c.baseURL, targetModel)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create http request: %w", err)
 	}
@@ -113,7 +236,7 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithResponseHeaderTimeout(requestCtx, cancel, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http execute request: %w", err)
 	}
@@ -133,7 +256,7 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 		return nil, fmt.Errorf("unmarshal google response: %w", err)
 	}
 
-	return FromGoogleResponse(&googleResp, targetModel)
+	return fromGoogleResponse(&googleResp, targetModel, googleReq.names, googleReq.signatureScope)
 }
 
 // CountTokens uses Gemini's tokenizer on the fully translated request,
@@ -142,6 +265,7 @@ func (c *Client) CountTokens(ctx context.Context, req *canonical.CanonicalReques
 	targetReq := *req
 	targetReq.Stream = false
 	targetModel := c.cleanModelName(targetReq.Model)
+	targetReq.SessionID = c.signatureScope(targetReq.SessionID, targetModel)
 	googleReq, err := ToGoogleRequest(&targetReq)
 	if err != nil {
 		return 0, fmt.Errorf("transform Google token count request: %w", err)
@@ -163,12 +287,14 @@ func (c *Client) CountTokens(ctx context.Context, req *canonical.CanonicalReques
 }
 
 func (c *Client) countTokens(ctx context.Context, req *canonical.CanonicalRequest, targetModel string, payload any) (int, error) {
+	requestCtx, cancel := c.requestContext(ctx)
+	defer cancel(nil)
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return 0, fmt.Errorf("marshal Google token count request: %w", err)
 	}
 	url := fmt.Sprintf("%s/models/%s:countTokens", c.baseURL, targetModel)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return 0, fmt.Errorf("create Google token count request: %w", err)
 	}
@@ -179,7 +305,7 @@ func (c *Client) countTokens(ctx context.Context, req *canonical.CanonicalReques
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithResponseHeaderTimeout(requestCtx, cancel, httpReq)
 	if err != nil {
 		return 0, fmt.Errorf("Google token count request: %w", err)
 	}
@@ -204,22 +330,29 @@ func (c *Client) countTokens(ctx context.Context, req *canonical.CanonicalReques
 }
 
 func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<-chan canonical.CanonicalEvent, error) {
-	req.Stream = true
-	targetModel := c.cleanModelName(req.Model)
+	targetReq := *req
+	targetReq.Stream = true
+	targetModel := c.cleanModelName(targetReq.Model)
+	targetReq.SessionID = c.signatureScope(targetReq.SessionID, targetModel)
+	req = &targetReq
+	requestCtx, cancel := c.requestContext(ctx)
 
 	googleReq, err := ToGoogleRequest(req)
 	if err != nil {
+		cancel(nil)
 		return nil, fmt.Errorf("transform to google stream request: %w", err)
 	}
 
 	bodyBytes, err := json.Marshal(googleReq)
 	if err != nil {
+		cancel(nil)
 		return nil, fmt.Errorf("marshal google request: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse", c.baseURL, targetModel)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
+		cancel(nil)
 		return nil, fmt.Errorf("create http stream request: %w", err)
 	}
 
@@ -232,14 +365,16 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithResponseHeaderTimeout(requestCtx, cancel, httpReq)
 	if err != nil {
+		cancel(nil)
 		return nil, fmt.Errorf("http stream request: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		cancel(nil)
 		apiErr := c.apiError("stream", resp.StatusCode, body)
 		log.Printf("[GOOGLE STREAM ERROR] %v (target: %s)", apiErr, url)
 		return nil, apiErr
@@ -248,11 +383,21 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	eventChan := make(chan canonical.CanonicalEvent, 64)
 
 	go func() {
-		defer resp.Body.Close()
+		body := newIdleReadCloser(resp.Body, c.timeouts.StreamIdle)
+		defer body.Close()
+		defer cancel(nil)
 		defer close(eventChan)
-		stop := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
+		stop := context.AfterFunc(requestCtx, func() { _ = body.Close() })
 		defer stop()
 		send := func(ev canonical.CanonicalEvent) bool {
+			select {
+			case <-requestCtx.Done():
+				return false
+			case eventChan <- ev:
+				return true
+			}
+		}
+		sendFinal := func(ev canonical.CanonicalEvent) bool {
 			select {
 			case <-ctx.Done():
 				return false
@@ -262,46 +407,79 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 		}
 
 		nextToolIndex := map[int]int{}
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 4096), 16*1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
+		toolIndexes := map[[2]int]int{}
+		seenCandidate := map[int]bool{}
+		terminalCandidate := map[int]bool{}
+		hasToolCall := map[int]bool{}
+		translatedEvents := 0
+		frames, sawInput, decodeErr := decodeSSE(body, maxSSEEventBytes, func(data []byte) error {
+			events, err := parseGoogleStreamEvent(data, targetModel, googleReq.names, googleReq.signatureScope)
+			if err != nil {
+				return err
 			}
-
-			if strings.HasPrefix(line, "data: ") {
-				dataStr := strings.TrimPrefix(line, "data: ")
-				events, err := ParseGoogleStreamEvent([]byte(dataStr), targetModel)
-				if err != nil {
-					send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
-					return
-				}
-
-				indexes := map[[2]int]int{}
-				for _, ev := range events {
+			for _, ev := range events {
+				translatedEvents++
+				switch ev.Type {
+				case canonical.EventThinkingDelta, canonical.EventTextDelta:
+					seenCandidate[ev.CandidateIndex] = true
+				case canonical.EventToolCallStart, canonical.EventToolCallDelta, canonical.EventToolCallDone:
+					seenCandidate[ev.CandidateIndex] = true
+					hasToolCall[ev.CandidateIndex] = true
 					key := [2]int{ev.CandidateIndex, ev.Index}
 					if ev.Type == canonical.EventToolCallStart {
-						indexes[key] = nextToolIndex[ev.CandidateIndex]
+						toolIndexes[key] = nextToolIndex[ev.CandidateIndex]
 						nextToolIndex[ev.CandidateIndex]++
 					}
-					if ev.Type == canonical.EventToolCallStart || ev.Type == canonical.EventToolCallDelta || ev.Type == canonical.EventToolCallDone {
-						ev.Index = indexes[key]
+					if mapped, ok := toolIndexes[key]; ok {
+						ev.Index = mapped
 					}
-					select {
-					case <-ctx.Done():
-						return
-					case eventChan <- ev:
+					if ev.Type == canonical.EventToolCallDone {
+						delete(toolIndexes, key)
+					}
+				case canonical.EventMessageDelta:
+					if ev.FinishReason != "" {
+						seenCandidate[ev.CandidateIndex] = true
+						terminalCandidate[ev.CandidateIndex] = true
+						if hasToolCall[ev.CandidateIndex] && ev.FinishReason == "stop" {
+							ev.FinishReason = "tool_calls"
+						}
 					}
 				}
+				if !send(ev) {
+					return requestCtx.Err()
+				}
+			}
+			return nil
+		})
+
+		if decodeErr != nil {
+			if cause := context.Cause(requestCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+				decodeErr = cause
+			}
+			sendFinal(canonical.CanonicalEvent{Type: canonical.EventError, Error: decodeErr})
+			return
+		}
+		if requestCtx.Err() != nil {
+			if cause := context.Cause(requestCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+				sendFinal(canonical.CanonicalEvent{Type: canonical.EventError, Error: cause})
+			}
+			return
+		}
+		if (sawInput || frames > 0) && translatedEvents == 0 {
+			send(canonical.CanonicalEvent{Type: canonical.EventError, Error: errors.New("Google SSE stream contained no decodable response events")})
+			return
+		}
+		if len(seenCandidate) == 0 {
+			send(canonical.CanonicalEvent{Type: canonical.EventError, Error: io.ErrUnexpectedEOF})
+			return
+		}
+		for index := range seenCandidate {
+			if !terminalCandidate[index] {
+				send(canonical.CanonicalEvent{Type: canonical.EventError, CandidateIndex: index, Error: io.ErrUnexpectedEOF})
+				return
 			}
 		}
-
-		if err := scanner.Err(); err != nil && err != io.EOF {
-			send(canonical.CanonicalEvent{Type: canonical.EventError, Error: err})
-		} else {
-			send(canonical.CanonicalEvent{Type: canonical.EventMessageDone})
-		}
+		send(canonical.CanonicalEvent{Type: canonical.EventMessageDone})
 	}()
 
 	return eventChan, nil
@@ -320,7 +498,9 @@ func (c *Client) ListModels(ctx context.Context) ([]providers.ModelInfo, error) 
 		return list, nil
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/models", nil)
+	requestCtx, cancel := c.requestContext(ctx)
+	defer cancel(nil)
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, c.baseURL+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +511,7 @@ func (c *Client) ListModels(ctx context.Context) ([]providers.ModelInfo, error) 
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithResponseHeaderTimeout(requestCtx, cancel, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http execute request: %w", err)
 	}
@@ -340,11 +520,11 @@ func (c *Client) ListModels(ctx context.Context) ([]providers.ModelInfo, error) 
 	// If /v1beta/models returned non-200 (e.g. 404 or 401) and baseURL ends with /v1beta, try fallback to /v1/models (e.g. enterprise gateway catalog)
 	if resp.StatusCode != http.StatusOK && strings.HasSuffix(c.baseURL, "/v1beta") {
 		altURL := strings.TrimSuffix(c.baseURL, "/v1beta") + "/v1/models"
-		if altReq, err := http.NewRequestWithContext(ctx, http.MethodGet, altURL, nil); err == nil {
+		if altReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, altURL, nil); err == nil {
 			if apiKey != "" {
 				altReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
-			if altResp, err := c.httpClient.Do(altReq); err == nil {
+			if altResp, err := c.doWithResponseHeaderTimeout(requestCtx, cancel, altReq); err == nil {
 				if altResp.StatusCode == http.StatusOK {
 					resp.Body.Close()
 					resp = altResp

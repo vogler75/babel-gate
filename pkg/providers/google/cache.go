@@ -27,20 +27,67 @@ func newSignatureCache(capacity int) *signatureCache {
 
 var globalSignatureCache = newSignatureCache(10000)
 
+// noThoughtSignature records that Google deliberately omitted a signature for
+// this call (for example, later calls in a parallel function-call response).
+// This is distinct from a cache miss, where a cross-protocol caller needs the
+// documented validator-bypass sentinel.
+const noThoughtSignature = "\x00"
+
+func signatureKey(scope, callID string) string {
+	if scope == "" || callID == "" {
+		return ""
+	}
+	return scope + "\x00" + callID
+}
+
 // StoreThoughtSignature caches the thought signature for a given toolCallID.
 func StoreThoughtSignature(callID, signature string) {
-	if callID == "" || signature == "" {
-		return
-	}
-	globalSignatureCache.Set(callID, signature)
+	StoreThoughtSignatureForScope("legacy", callID, signature)
 }
 
 // GetThoughtSignature retrieves the thought signature by toolCallID.
 func GetThoughtSignature(callID string) string {
-	if callID == "" {
-		return ""
+	return GetThoughtSignatureForScope("legacy", callID)
+}
+
+// StoreThoughtSignatureForScope keeps signatures isolated between client
+// sessions. Google signatures are opaque and must never be reused across
+// unrelated conversations that happen to choose the same tool-call ID.
+func StoreThoughtSignatureForScope(scope, callID, signature string) {
+	key := signatureKey(scope, callID)
+	if key == "" || signature == "" {
+		return
 	}
-	return globalSignatureCache.Get(callID)
+	globalSignatureCache.Set(key, signature)
+}
+
+func GetThoughtSignatureForScope(scope, callID string) string {
+	signature, _ := lookupThoughtSignatureForScope(scope, callID)
+	return signature
+}
+
+func storeThoughtSignaturePresenceForScope(scope, callID, signature string) {
+	key := signatureKey(scope, callID)
+	if key == "" {
+		return
+	}
+	if signature == "" {
+		signature = noThoughtSignature
+	}
+	globalSignatureCache.Set(key, signature)
+
+}
+
+func lookupThoughtSignatureForScope(scope, callID string) (string, bool) {
+	key := signatureKey(scope, callID)
+	if key == "" {
+		return "", false
+	}
+	signature, ok := globalSignatureCache.Lookup(key)
+	if signature == noThoughtSignature {
+		return "", ok
+	}
+	return signature, ok
 }
 
 func (c *signatureCache) Set(key, value string) {
@@ -67,13 +114,18 @@ func (c *signatureCache) Set(key, value string) {
 }
 
 func (c *signatureCache) Get(key string) string {
+	value, _ := c.Lookup(key)
+	return value
+}
+
+func (c *signatureCache) Lookup(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if elem, ok := c.items[key]; ok {
 		c.evictList.MoveToFront(elem)
-		return elem.Value.(*cacheEntry).value
+		return elem.Value.(*cacheEntry).value, true
 	}
 
-	return ""
+	return "", false
 }

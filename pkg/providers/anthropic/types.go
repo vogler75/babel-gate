@@ -10,6 +10,7 @@ import (
 type MessageRequest struct {
 	names         *toolnames.Mapping
 	ToolChoice    any              `json:"tool_choice,omitempty"`
+	Thinking      *ThinkingConfig  `json:"thinking,omitempty"`
 	Model         string           `json:"model"`
 	Messages      []Message        `json:"messages"`
 	System        any              `json:"system,omitempty"` // string or []SystemPart
@@ -20,6 +21,11 @@ type MessageRequest struct {
 	StopSequences []string         `json:"stop_sequences,omitempty"`
 	Tools         []ToolDefinition `json:"tools,omitempty"`
 	Stream        bool             `json:"stream,omitempty"`
+}
+
+type ThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens *int   `json:"budget_tokens,omitempty"`
 }
 
 type Message struct {

@@ -15,6 +15,7 @@ import (
 type Constraints struct {
 	MaxLength int
 	Allowed   func(rune) bool
+	Valid     func(string) bool
 }
 
 func ASCII(r rune) bool {
@@ -54,6 +55,9 @@ func Normalize(req *canonical.CanonicalRequest, c Constraints) (*canonical.Canon
 		for _, r := range name {
 			valid = valid && c.Allowed(r)
 		}
+		if valid && c.Valid != nil {
+			valid = c.Valid(name)
+		}
 		if valid {
 			m.forward[name] = name
 			m.reverse[name] = name
@@ -71,6 +75,9 @@ func Normalize(req *canonical.CanonicalRequest, c Constraints) (*canonical.Canon
 		}, name)
 		if base == "" {
 			base = "tool"
+		}
+		if c.Valid != nil && !c.Valid(base) {
+			base = "tool_" + base
 		}
 		for n := 0; ; n++ {
 			sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", name, n)))
