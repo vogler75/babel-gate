@@ -41,7 +41,7 @@
 
 Just as the mythical Tower of Babel was the intersection of all human languages, **BabelGate** serves as the universal real-time translator for AI model protocols:
 - **Claude Code** expects the Anthropic Messages API (`/v1/messages`) with strict SSE framing and tool definitions.
-- **OpenAI clients** expect the Chat Completions API (`/v1/chat/completions`).
+- **OpenAI clients** use the Responses API (`/v1/responses`) or Chat Completions API (`/v1/chat/completions`).
 - **Google GenAI clients** expect the Gemini REST API (`/v1beta/models/...`).
 
 **BabelGate** bridges this divide. It accepts incoming requests in **any** supported protocol, converts them into a normalized canonical structure, and routes them out to **any** upstream provider—translating streaming events, tool/function calls, and token telemetry in real time.
@@ -75,6 +75,7 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
 |---|:---:|:---:|:---:|:---:|:---:|
 | **Anthropic Messages** (`/v1/messages`) | ✅ Direct | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation |
 | **OpenAI Chat** (`/v1/chat/completions`) | ✅ Full Translation | ✅ Full Translation | ✅ Direct | ✅ Full Translation | ✅ Direct |
+| **OpenAI Responses** (`/v1/responses`) | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation |
 | **Google Gemini REST** (`/v1beta/...`) | ✅ Full Translation | ✅ Direct | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation |
 | **Bidirectional Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Server-Sent Events (SSE)** | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -503,6 +504,7 @@ routing:
 | `/v1/messages/count_tokens` | `POST` | Anthropic Token Counting | Count input tokens with the routed provider's native tokenizer when available |
 | `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
 | `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
+| `/v1/responses` | `POST` | OpenAI Responses | OpenAI SDK and Codex CLI entrypoint (including SSE streaming) |
 | `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |
 | `/v1beta/models/{model}:streamGenerateContent` | `POST` | Google Gemini REST (SSE) | Google GenAI streaming completions |
 | `/v1/models` | `GET` | OpenAI or Anthropic format | Auto-detects client format or responds with OpenAI models |

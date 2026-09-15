@@ -290,6 +290,100 @@ func TestOpenAIClientToUpstream(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesClientToUpstream(t *testing.T) {
+	handler := setupTestHandler()
+	payload := `{"model":"google/gemini-2.5-pro","input":"Responses API test"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID     string `json:"id"`
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(resp.ID, "resp_") || resp.Object != "response" || resp.Status != "completed" {
+		t.Fatalf("unexpected response envelope: %+v", resp)
+	}
+	if len(resp.Output) != 1 || len(resp.Output[0].Content) != 1 || !strings.Contains(resp.Output[0].Content[0].Text, "Responses API test") {
+		t.Fatalf("unexpected output: %+v", resp.Output)
+	}
+	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 20 || resp.Usage.TotalTokens != 30 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+}
+
+func TestOpenAIResponsesStreaming(t *testing.T) {
+	handler := setupTestHandler()
+	payload := `{"model":"google/gemini-2.5-pro","input":"stream","stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, event := range []string{
+		"event: response.created", "event: response.output_item.added",
+		"event: response.output_text.delta", "event: response.output_text.done",
+		"event: response.output_item.done", "event: response.completed",
+	} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %s in stream: %s", event, body)
+		}
+	}
+	if !strings.Contains(body, `"delta":"Hello from "`) || !strings.Contains(body, `"delta":"Gemini stream!"`) {
+		t.Fatalf("text deltas missing: %s", body)
+	}
+	if strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("Responses API stream must end with response.completed: %s", body)
+	}
+}
+
+func TestOpenAIResponsesLiteAdditionalTools(t *testing.T) {
+	handler := setupTestHandler()
+	payload := `{
+		"model":"google/gemini-2.5-pro",
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"functions","description":"Client tools","tools":[
+					{"type":"custom","name":"exec","description":"Run JavaScript tool orchestration","format":{"type":"text"}},
+					{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}}
+				]}
+			]},
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected Responses Lite request to be accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"completed"`) {
+		t.Fatalf("unexpected response: %s", rec.Body.String())
+	}
+}
+
 // TestGoogleClientToUpstream verifies Google Gemini /v1beta/models/...:generateContent
 func TestGoogleClientToUpstream(t *testing.T) {
 	handler := setupTestHandler()

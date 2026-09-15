@@ -2755,9 +2755,9 @@ export ANTHROPIC_API_KEY="dummy-key"</code></pre>
           <span>🤖 OpenAI Codex CLI (<code style="font-size: 1rem; color: #7ee787;">codex</code>)</span>
           <span class="tag tag-codex">OpenAI Protocol</span>
         </div>
-        <span class="badge">Chat Completions API</span>
+        <span class="badge">Responses API</span>
       </div>
-      <p>The OpenAI Codex CLI connects via the OpenAI Chat Completions API. BabelGate handles requests at <code>/v1/chat/completions</code> and automatically routes to any upstream model.</p>
+      <p>The OpenAI Codex CLI connects via the OpenAI Responses API. BabelGate handles requests at <code>/v1/responses</code> and automatically routes to any upstream model.</p>
 
       <div class="step-title">Option A: Environment Variables (Quick Run):</div>
       <div class="code-box">

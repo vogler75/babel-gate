@@ -70,9 +70,11 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/anthropic/v1/messages/count_tokens", anthropicHandler.HandleCountTokens)
 	mux.HandleFunc("/anthropic/v1/models", anthropicHandler.HandleModels)
 
-	// OpenAI Chat Completions API
+	// OpenAI Chat Completions and Responses APIs
 	mux.HandleFunc("/v1/chat/completions", openaiHandler.HandleChatCompletions)
 	mux.HandleFunc("/openai/v1/chat/completions", openaiHandler.HandleChatCompletions)
+	mux.HandleFunc("/v1/responses", openaiHandler.HandleResponses)
+	mux.HandleFunc("/openai/v1/responses", openaiHandler.HandleResponses)
 	mux.HandleFunc("/openai/v1/models", openaiHandler.HandleModels)
 
 	// Unified models endpoint
