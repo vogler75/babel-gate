@@ -202,6 +202,7 @@ func TestDetectClient(t *testing.T) {
 		{"", "Claude-Code/0.2.29 darwin-arm64", "Claude Code"},
 		{"", "@anthropic-ai/sdk 0.18.0", "Anthropic SDK"},
 		{"", "OpenAI/Python 1.12.0", "OpenAI SDK"},
+		{"", "google-genai-sdk/1.0 Python/3.12", "Google GenAI SDK"},
 		{"", "curl/7.88.1", "cURL"},
 		{"", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Web Browser"},
 		{"", "SomeOtherAgent/1.0", "API Client"},
@@ -212,6 +213,26 @@ func TestDetectClient(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("DetectClient(%q, %q) = %q, expected %q", tt.header, tt.ua, got, tt.expected)
 		}
+	}
+}
+
+func TestDetectClientProtocolFallback(t *testing.T) {
+	if got := DetectClientForProtocol("", "unknown/1.0", "google"); got != "Google GenAI Client" {
+		t.Fatalf("DetectClientForProtocol() = %q", got)
+	}
+}
+
+func TestSessionRecordsInboundProtocol(t *testing.T) {
+	mgr := NewManager()
+	sess := mgr.GetOrCreateWithProtocol("protocol-session", "127.0.0.1", "unknown/1.0", "OpenAI Client", "openai")
+	mgr.RecordRequest(sess.ID, RequestRecord{Model: "gpt-4o", Status: "success"})
+
+	got := mgr.ListSessions()[0]
+	if got.LastProtocol != "openai" {
+		t.Fatalf("last protocol = %q", got.LastProtocol)
+	}
+	if len(got.RecentRequests) != 1 || got.RecentRequests[0].Protocol != "openai" {
+		t.Fatalf("request protocol not recorded: %+v", got.RecentRequests)
 	}
 }
 

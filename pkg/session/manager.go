@@ -38,6 +38,7 @@ type SessionStore interface {
 type RequestRecord struct {
 	ID                   string    `json:"id"`
 	Timestamp            time.Time `json:"timestamp"`
+	Protocol             string    `json:"protocol,omitempty"`
 	Provider             string    `json:"provider,omitempty"`
 	Model                string    `json:"model"`
 	Stream               bool      `json:"stream"`
@@ -72,6 +73,7 @@ type ModelUsage struct {
 type Session struct {
 	ID                     string                 `json:"id"`
 	Client                 string                 `json:"client"` // e.g. "Claude Code", "Web Playground", "OpenAI SDK"
+	LastProtocol           string                 `json:"last_protocol,omitempty"`
 	ClientIP               string                 `json:"client_ip,omitempty"`
 	UserAgent              string                 `json:"user_agent,omitempty"`
 	CreatedAt              time.Time              `json:"created_at"`
@@ -180,6 +182,13 @@ func GenerateID(prefix string) string {
 
 // DetectClient inspects headers to identify the client application.
 func DetectClient(clientHeader, userAgent string) string {
+	return DetectClientForProtocol(clientHeader, userAgent, "")
+}
+
+// DetectClientForProtocol identifies the client application when possible and
+// falls back to a useful protocol-specific name. Protocol is telemetry only;
+// endpoint routing must not depend on a spoofable client name or User-Agent.
+func DetectClientForProtocol(clientHeader, userAgent, protocol string) string {
 	if clientHeader != "" {
 		return clientHeader
 	}
@@ -191,6 +200,9 @@ func DetectClient(clientHeader, userAgent string) string {
 		return "Anthropic SDK"
 	case strings.Contains(ua, "openai"):
 		return "OpenAI SDK"
+	case strings.Contains(ua, "google-genai") || strings.Contains(ua, "googleapis") ||
+		strings.Contains(ua, "gemini-cli") || strings.Contains(ua, "antigravity"):
+		return "Google GenAI SDK"
 	case strings.Contains(ua, "curl"):
 		return "cURL"
 	case strings.Contains(ua, "mozilla") || strings.Contains(ua, "chrome") || strings.Contains(ua, "safari"):
@@ -200,12 +212,27 @@ func DetectClient(clientHeader, userAgent string) string {
 	case strings.Contains(ua, "python"):
 		return "Python Client"
 	default:
-		return "API Client"
+		switch protocol {
+		case "anthropic":
+			return "Anthropic Client"
+		case "openai":
+			return "OpenAI Client"
+		case "google":
+			return "Google GenAI Client"
+		default:
+			return "API Client"
+		}
 	}
 }
 
 // GetOrCreate finds an existing active session or creates a new one.
 func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string) *Session {
+	return m.GetOrCreateWithProtocol(sessionID, clientIP, userAgent, clientName, "")
+}
+
+// GetOrCreateWithProtocol finds or creates a session and records the inbound
+// wire protocol independently from the client application name.
+func (m *Manager) GetOrCreateWithProtocol(sessionID, clientIP, userAgent, clientName, protocol string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -216,6 +243,9 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 	if sessionID != "" {
 		if s, ok := m.sessions[sessionID]; ok {
 			s.LastActive = now
+			if protocol != "" {
+				s.LastProtocol = protocol
+			}
 			if clientName != "" && (s.Client == "" || s.Client == "API Client") {
 				s.Client = clientName
 			}
@@ -226,6 +256,7 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 		newSess := &Session{
 			ID:             sessionID,
 			Client:         clientName,
+			LastProtocol:   protocol,
 			ClientIP:       clientIP,
 			UserAgent:      userAgent,
 			CreatedAt:      now,
@@ -250,6 +281,9 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 		if s != nil && s.ClientIP == clientIP && s.Client == clientName {
 			if now.Sub(s.LastActive) <= m.idleTimeout {
 				s.LastActive = now
+				if protocol != "" {
+					s.LastProtocol = protocol
+				}
 				return s
 			}
 		}
@@ -260,6 +294,7 @@ func (m *Manager) GetOrCreate(sessionID, clientIP, userAgent, clientName string)
 	newSess := &Session{
 		ID:             newID,
 		Client:         clientName,
+		LastProtocol:   protocol,
 		ClientIP:       clientIP,
 		UserAgent:      userAgent,
 		CreatedAt:      now,
@@ -316,6 +351,11 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		}
 	}
 
+	s, sessionExists := m.sessions[sessionID]
+	if rec.Protocol == "" && sessionExists {
+		rec.Protocol = s.LastProtocol
+	}
+
 	if detailed, ok := m.metricsRecorder.(DetailedMetricsRecorder); ok {
 		isErr := rec.Status == "error"
 		_ = detailed.RecordDetailed(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, rec.CachedInputTokens, rec.ReasoningTokens, isErr)
@@ -324,9 +364,11 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 		_ = m.metricsRecorder.Record(rec.Timestamp, rec.Provider, rec.Model, rec.InputTokens, rec.OutputTokens, rec.TotalTokens, isErr)
 	}
 
-	s, ok := m.sessions[sessionID]
-	if !ok {
+	if !sessionExists {
 		return
+	}
+	if rec.Protocol != "" {
+		s.LastProtocol = rec.Protocol
 	}
 
 	s.LastActive = rec.Timestamp

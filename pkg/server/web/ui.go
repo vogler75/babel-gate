@@ -785,7 +785,7 @@ const dashboardHTML = `<!DOCTYPE html>
           <button id="copyClaudeCodeButton" class="btn-sm" onclick="copyClaudeCodeConfig()">Copy JSON</button>
         </div>
         <pre id="claudeCodeConfigOutput"></pre>
-        <div class="muted">Add or merge this <code>modelPicker</code> block into your Claude Code <code>settings.json</code> (user settings at <code>~/.claude/settings.json</code> or project settings at <code>.claude/settings.json</code>). Make sure <code>ANTHROPIC_BASE_URL</code> points to your BabelGate server (e.g. <code><span id="claudeCodeBaseUrl">http://localhost:8080</span></code>).</div>
+        <div class="muted">Add or merge this <code>modelPicker</code> block into your Claude Code <code>settings.json</code> (user settings at <code>~/.claude/settings.json</code> or project settings at <code>.claude/settings.json</code>). Make sure <code>ANTHROPIC_BASE_URL</code> points to your BabelGate server (e.g. <code><span id="claudeCodeBaseUrl">http://localhost:8080/anthropic</span></code>).</div>
       </div>
     </div>
 
@@ -1211,7 +1211,8 @@ const dashboardHTML = `<!DOCTYPE html>
 
           const tr = document.createElement('tr');
           tr.innerHTML = '<td><code>' + escapeHtml(s.id) + '</code></td>' +
-            '<td><span class="pill ' + clientPill + '">' + escapeHtml(s.client || 'Client') + '</span></td>' +
+            '<td><span class="pill ' + clientPill + '">' + escapeHtml(s.client || 'Client') + '</span>' +
+            (s.last_protocol ? '<span class="pill ' + getProviderPillClass(s.last_protocol) + '" style="margin-left:0.25rem;">' + escapeHtml(s.last_protocol) + '</span>' : '') + '</td>' +
             '<td>' + modelsHtml + '</td>' +
             '<td><strong>' + formatNumber(reqCount) + '</strong></td>' +
             '<td title="' + (s.context_tokens_estimated ? 'Estimated input of the latest request' : 'Provider-reported input of the latest request, including cache') + '"><strong class="token-in">' + (s.context_tokens_estimated ? '~' : '') + formatNumber(s.context_tokens) + '</strong></td>' +
@@ -1239,7 +1240,8 @@ const dashboardHTML = `<!DOCTYPE html>
               '</tr></thead><tbody>' +
               s.recent_requests.map(r => {
                 const statusColor = r.status === 'success' ? '#3fb950' : '#f85149';
-                const typeBadge = r.stream ? '<span class="badge">stream</span>' : '<span class="badge">sync</span>';
+                const typeBadge = (r.protocol ? '<span class="pill ' + getProviderPillClass(r.protocol) + '" style="margin-right:0.25rem;">' + escapeHtml(r.protocol) + '</span>' : '') +
+                  (r.stream ? '<span class="badge">stream</span>' : '<span class="badge">sync</span>');
                 const timeStr = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '';
                 return '<tr>' +
                   '<td>' + escapeHtml(timeStr) + '</td>' +
@@ -1517,7 +1519,7 @@ const dashboardHTML = `<!DOCTYPE html>
           babelgate: {
             name: 'BabelGate',
             npm: '@ai-sdk/openai-compatible',
-            options: { baseURL: origin + '/v1' },
+            options: { baseURL: origin + '/openai/v1' },
             models: models
           }
         }
@@ -1578,7 +1580,7 @@ const dashboardHTML = `<!DOCTYPE html>
         ? window.location.origin.replace(/\/$/, '')
         : 'http://localhost:8080';
       const baseUrlEl = document.getElementById('claudeCodeBaseUrl');
-      if (baseUrlEl) baseUrlEl.textContent = origin;
+      if (baseUrlEl) baseUrlEl.textContent = origin + '/anthropic';
 
       const fragment = {
         modelPicker: {
@@ -2696,7 +2698,7 @@ const setupHTML = `<!DOCTYPE html>
         </div>
         <span class="badge">Native Messages API</span>
       </div>
-      <p>Claude Code uses the Anthropic Messages API. BabelGate serves Anthropic requests directly on <code>/v1/messages</code> and translates them to any configured upstream provider (OpenAI, Anthropic, Gemini, Azure, etc.).</p>
+      <p>Claude Code uses the Anthropic Messages API. BabelGate serves it on the dedicated <code>/anthropic/v1/messages</code> endpoint (also available through the <code>/claude</code> alias) and translates requests to any configured upstream provider.</p>
 
       <div class="step-title">Configuration in <code>.claude/settings.json</code>:</div>
       <p>The following environment settings are needed in your project's <code>.claude/settings.json</code> (or global <code>~/.claude/settings.json</code>):</p>
@@ -2704,7 +2706,7 @@ const setupHTML = `<!DOCTYPE html>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-json">{
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+    "ANTHROPIC_BASE_URL": "http://localhost:8080/anthropic",
     "ANTHROPIC_API_KEY": "dummy",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -2722,7 +2724,7 @@ const setupHTML = `<!DOCTYPE html>
       <div class="step-title">Quick Launch (Current Terminal Session):</div>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        <pre><code class="lang-sh">export ANTHROPIC_BASE_URL="http://localhost:8080"
+        <pre><code class="lang-sh">export ANTHROPIC_BASE_URL="http://localhost:8080/anthropic"
 export ANTHROPIC_API_KEY="dummy-key"
 claude</code></pre>
       </div>
@@ -2743,7 +2745,7 @@ claude --model gpt-4o</code></pre>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-sh"># BabelGate configuration for Claude Code
-export ANTHROPIC_BASE_URL="http://localhost:8080"
+export ANTHROPIC_BASE_URL="http://localhost:8080/anthropic"
 export ANTHROPIC_API_KEY="dummy-key"</code></pre>
       </div>
     </div>
@@ -2757,12 +2759,12 @@ export ANTHROPIC_API_KEY="dummy-key"</code></pre>
         </div>
         <span class="badge">Responses API</span>
       </div>
-      <p>The OpenAI Codex CLI connects via the OpenAI Responses API. BabelGate handles requests at <code>/v1/responses</code> and automatically routes to any upstream model.</p>
+      <p>The OpenAI Codex CLI connects through BabelGate's dedicated <code>/openai/v1</code> namespace and automatically routes to any upstream model.</p>
 
       <div class="step-title">Option A: Environment Variables (Quick Run):</div>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        <pre><code class="lang-sh">export OPENAI_BASE_URL="http://localhost:8080/v1"
+        <pre><code class="lang-sh">export OPENAI_BASE_URL="http://localhost:8080/openai/v1"
 export OPENAI_API_KEY="dummy-key"
 codex</code></pre>
       </div>
@@ -2772,7 +2774,7 @@ codex</code></pre>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-toml"># Add to ~/.codex/config.toml
-openai_base_url = "http://localhost:8080/v1"</code></pre>
+openai_base_url = "http://localhost:8080/openai/v1"</code></pre>
       </div>
 
       <div class="step-title">Option C: Command-Line Flag Override:</div>
@@ -2780,10 +2782,10 @@ openai_base_url = "http://localhost:8080/v1"</code></pre>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre><code class="lang-sh"># Connect to router via CLI flag
-codex -c openai_base_url="http://localhost:8080/v1"
+codex -c openai_base_url="http://localhost:8080/openai/v1"
 
 # Specify a target model or routed alias:
-codex -c openai_base_url="http://localhost:8080/v1" -m gpt-4o</code></pre>
+codex -c openai_base_url="http://localhost:8080/openai/v1" -m gpt-4o</code></pre>
       </div>
     </div>
 
@@ -2796,7 +2798,7 @@ codex -c openai_base_url="http://localhost:8080/v1" -m gpt-4o</code></pre>
         </div>
         <span class="badge">Google Gemini API</span>
       </div>
-      <p>The Antigravity CLI (<code>agy</code>) supports direct Gemini API connections. BabelGate serves Google Gemini endpoints natively on <code>/v1beta/models/...</code> and <code>/v1/models/...</code>.</p>
+      <p>The Antigravity CLI (<code>agy</code>) supports direct Gemini API connections. BabelGate serves Google Gemini endpoints under the dedicated <code>/google/v1beta/models/...</code> and <code>/google/v1/models/...</code> namespaces.</p>
 
       <div class="step-title">Step 1: Set modelProvider in <code>~/.gemini/antigravity-cli/settings.json</code>:</div>
       <p>Ensure <code>modelProvider</code> is configured to <code>"gemini"</code>:</p>
@@ -2811,7 +2813,7 @@ codex -c openai_base_url="http://localhost:8080/v1" -m gpt-4o</code></pre>
       <p>Point <code>GOOGLE_GEMINI_BASE_URL</code> to the router:</p>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        <pre><code class="lang-sh">export GOOGLE_GEMINI_BASE_URL="http://localhost:8080"
+        <pre><code class="lang-sh">export GOOGLE_GEMINI_BASE_URL="http://localhost:8080/google"
 export GEMINI_API_KEY="dummy-key"
 agy</code></pre>
       </div>
@@ -2826,7 +2828,7 @@ agy --model gemini-2.5-flash
 agy --model claude-3-7-sonnet</code></pre>
       </div>
       <div class="note">
-        <strong>Tip:</strong> You can permanently append <code>export GOOGLE_GEMINI_BASE_URL="http://localhost:8080"</code> and <code>export GEMINI_API_KEY="dummy-key"</code> to your <code>~/.zshrc</code>.
+        <strong>Tip:</strong> You can permanently append <code>export GOOGLE_GEMINI_BASE_URL="http://localhost:8080/google"</code> and <code>export GEMINI_API_KEY="dummy-key"</code> to your <code>~/.zshrc</code>.
       </div>
     </div>
 
@@ -2846,7 +2848,7 @@ agy --model claude-3-7-sonnet</code></pre>
         <pre><code class="lang-python">from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8080/v1",
+    base_url="http://localhost:8080/openai/v1",
     api_key="dummy-key"  # Router ignores if no auth configured
 )
 
@@ -2863,7 +2865,7 @@ print(response.choices[0].message.content)</code></pre>
       <div class="step-title">cURL (OpenAI Chat Completions):</div>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-        <pre><code class="lang-sh">curl http://localhost:8080/v1/chat/completions \
+        <pre><code class="lang-sh">curl http://localhost:8080/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer dummy-key" \
   -d '{
@@ -2892,7 +2894,7 @@ from google.genai import types
 client = genai.Client(
     api_key="dummy-key",
     http_options=types.HttpOptions(
-        base_url="http://localhost:8080"
+        base_url="http://localhost:8080/google"
     )
 )
 

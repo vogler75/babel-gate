@@ -184,6 +184,7 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 	CREATE TABLE IF NOT EXISTS sessions (
 		id TEXT PRIMARY KEY,
 		client TEXT NOT NULL,
+		last_protocol TEXT NOT NULL DEFAULT '',
 		client_ip TEXT NOT NULL DEFAULT '',
 		user_agent TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
@@ -209,6 +210,7 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		id TEXT PRIMARY KEY,
 		session_id TEXT NOT NULL,
 		timestamp TEXT NOT NULL,
+		protocol TEXT NOT NULL DEFAULT '',
 		provider TEXT NOT NULL DEFAULT '',
 		model TEXT NOT NULL,
 		stream INTEGER NOT NULL DEFAULT 0,
@@ -242,6 +244,8 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		"ALTER TABLE session_requests ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
 		"ALTER TABLE sessions ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;",
 		"ALTER TABLE sessions ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE sessions ADD COLUMN last_protocol TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE session_requests ADD COLUMN protocol TEXT NOT NULL DEFAULT '';",
 	} {
 		_, _ = db.Exec(alter)
 	}

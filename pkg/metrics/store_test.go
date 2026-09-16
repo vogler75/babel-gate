@@ -195,6 +195,7 @@ func TestStore_SessionPersistence(t *testing.T) {
 	sess := &session.Session{
 		ID:                     "sess_test_123",
 		Client:                 "Claude Code",
+		LastProtocol:           "anthropic",
 		ClientIP:               "127.0.0.1",
 		UserAgent:              "claude-code/1.0",
 		CreatedAt:              now.Add(-10 * time.Minute),
@@ -223,6 +224,7 @@ func TestStore_SessionPersistence(t *testing.T) {
 	req1 := session.RequestRecord{
 		ID:                   "req_1",
 		Timestamp:            now.Add(-5 * time.Minute),
+		Protocol:             "anthropic",
 		Provider:             "google",
 		Model:                "google/gemini-2.5-pro",
 		Stream:               true,
@@ -237,6 +239,7 @@ func TestStore_SessionPersistence(t *testing.T) {
 	req2 := session.RequestRecord{
 		ID:                   "req_2",
 		Timestamp:            now,
+		Protocol:             "openai",
 		Provider:             "openai",
 		Model:                "openai/gpt-4o",
 		Stream:               false,
@@ -272,6 +275,9 @@ func TestStore_SessionPersistence(t *testing.T) {
 	if loadedSess.Client != sess.Client {
 		t.Errorf("expected client %s, got %s", sess.Client, loadedSess.Client)
 	}
+	if loadedSess.LastProtocol != "anthropic" {
+		t.Errorf("expected last protocol anthropic, got %s", loadedSess.LastProtocol)
+	}
 	if loadedSess.TotalTokens != 400 {
 		t.Errorf("expected 400 total tokens, got %d", loadedSess.TotalTokens)
 	}
@@ -293,6 +299,9 @@ func TestStore_SessionPersistence(t *testing.T) {
 	// Recent requests must be ordered newest first (req2 then req1)
 	if loadedSess.RecentRequests[0].ID != "req_2" {
 		t.Errorf("expected most recent request to be req_2, got %s", loadedSess.RecentRequests[0].ID)
+	}
+	if loadedSess.RecentRequests[0].Protocol != "openai" || loadedSess.RecentRequests[1].Protocol != "anthropic" {
+		t.Errorf("request protocols were not restored: %+v", loadedSess.RecentRequests)
 	}
 	if loadedSess.RecentRequests[1].ID != "req_1" {
 		t.Errorf("expected second request to be req_1, got %s", loadedSess.RecentRequests[1].ID)

@@ -40,9 +40,9 @@
 ## Overview
 
 Just as the mythical Tower of Babel was the intersection of all human languages, **BabelGate** serves as the universal real-time translator for AI model protocols:
-- **Claude Code** expects the Anthropic Messages API (`/v1/messages`) with strict SSE framing and tool definitions.
-- **OpenAI clients** use the Responses API (`/v1/responses`) or Chat Completions API (`/v1/chat/completions`).
-- **Google GenAI clients** expect the Gemini REST API (`/v1beta/models/...`).
+- **Claude Code** uses the Anthropic Messages API (`/anthropic/v1/messages`) with strict SSE framing and tool definitions.
+- **OpenAI clients** use the Responses API (`/openai/v1/responses`) or Chat Completions API (`/openai/v1/chat/completions`).
+- **Google GenAI clients** use the Gemini REST API (`/google/v1beta/models/...`).
 
 **BabelGate** bridges this divide. It accepts incoming requests in **any** supported protocol, converts them into a normalized canonical structure, and routes them out to **any** upstream provider—translating streaming events, tool/function calls, and token telemetry in real time.
 
@@ -73,9 +73,9 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
 
 | Inbound Client Protocol | Upstream: Anthropic | Upstream: Google Gemini | Upstream: OpenAI | Upstream: GitHub Copilot | Upstream: OpenAI-Compatible (Ollama, vLLM, Corporate) |
 |---|:---:|:---:|:---:|:---:|:---:|
-| **Anthropic Messages** (`/v1/messages`) | ✅ Direct | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation |
-| **OpenAI Chat** (`/v1/chat/completions`) | ✅ Full Translation | ✅ Full Translation | ✅ Direct | ✅ Full Translation | ✅ Direct |
-| **OpenAI Responses** (`/v1/responses`) | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation |
+| **Anthropic Messages** (`/anthropic/v1/messages`) | ✅ Direct | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation |
+| **OpenAI Chat** (`/openai/v1/chat/completions`) | ✅ Full Translation | ✅ Full Translation | ✅ Direct | ✅ Full Translation | ✅ Direct |
+| **OpenAI Responses** (`/openai/v1/responses`) | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation | ✅ Translation |
 | **Google Gemini REST** (`/v1beta/...`) | ✅ Full Translation | ✅ Direct | ✅ Full Translation | ✅ Full Translation | ✅ Full Translation |
 | **Bidirectional Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Server-Sent Events (SSE)** | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -103,7 +103,7 @@ Just as the mythical Tower of Babel was the intersection of all human languages,
       └──────────┬───────────┴──────────┬───────────┴──────────┬───────────┘
                  │                      │                      │
                  ▼                      ▼                      ▼
-           /v1/messages        /v1/chat/completions    /v1beta/models/...
+    /anthropic/v1/messages  /openai/v1/...      /google/v1beta/models/...
                  │                      │                      │
       ┌──────────┴──────────────────────┴──────────────────────┴───────────┐
       │                      CANONICAL PROTOCOL LAYER                      │
@@ -210,7 +210,7 @@ Route Claude Code to Google's high-context Gemini models:
 
 3. Start Claude Code pointing to BabelGate:
    ```bash
-   export ANTHROPIC_BASE_URL="http://localhost:8080"
+   export ANTHROPIC_BASE_URL="http://localhost:8080/anthropic"
    export ANTHROPIC_API_KEY="dummy-key"
    claude
    ```
@@ -219,7 +219,7 @@ Route Claude Code to Google's high-context Gemini models:
    ```json
    {
      "env": {
-       "ANTHROPIC_BASE_URL": "http://localhost:8080/",
+       "ANTHROPIC_BASE_URL": "http://localhost:8080/anthropic",
        "ANTHROPIC_API_KEY": "dummy",
        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -261,7 +261,7 @@ Leverage your GitHub Copilot subscription inside Claude Code:
 
 3. Run Claude Code:
    ```bash
-   export ANTHROPIC_BASE_URL="http://localhost:8080"
+   export ANTHROPIC_BASE_URL="http://localhost:8080/anthropic"
    export ANTHROPIC_API_KEY="dummy"
    claude
    ```
@@ -295,7 +295,7 @@ Point any standard OpenAI SDK client directly to `babelgate`:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8080/v1",
+    base_url="http://localhost:8080/openai/v1",
     api_key="dummy-key"
 )
 
@@ -316,7 +316,7 @@ for chunk in stream:
 import OpenAI from "openai";
 
 const openai = new OpenAI({
-  baseURL: "http://localhost:8080/v1",
+  baseURL: "http://localhost:8080/openai/v1",
   apiKey: "dummy-key",
 });
 
@@ -335,7 +335,7 @@ console.log(completion.choices[0].message.content);
 Use standard Google Gemini REST endpoints to query OpenAI or Anthropic models:
 
 ```bash
-curl -X POST "http://localhost:8080/v1beta/models/openai/gpt-4o:generateContent" \
+curl -X POST "http://localhost:8080/google/v1beta/models/openai/gpt-4o:generateContent" \
   -H "Content-Type: application/json" \
   -d '{
     "contents": [{
@@ -432,7 +432,7 @@ GitHub Copilot can be authenticated through three convenient methods:
 - **Generation Throughput**: Compare output tokens per second for each completed request and session. Streaming throughput excludes time-to-first-token.
 - **Setup & Client Integration Guide**: Step-by-step guides and configuration snippets at `/setup` for Claude Code, Codex CLI, Antigravity CLI, OpenAI SDK, Gemini SDK, and GitHub Copilot.
 
-For Anthropic clients routed to Google, BabelGate returns the upstream prompt usage in the final streaming `message_delta`, correcting the initial estimate. The `/v1/messages/count_tokens` endpoint uses the routed Google model's tokenizer and supports both Gemini Developer API and Vertex-style gateway payloads. Other providers currently use a rough text estimate. Google context-overflow errors are returned as HTTP 400 `invalid_request_error` with `prompt is too long` and the upstream details. A client may still have its own model window setting and counting logic; restarting BabelGate does not compact the conversation stored by the client.
+For Anthropic clients routed to Google, BabelGate returns the upstream prompt usage in the final streaming `message_delta`, correcting the initial estimate. The `/anthropic/v1/messages/count_tokens` endpoint uses the routed Google model's tokenizer and supports both Gemini Developer API and Vertex-style gateway payloads. Other providers currently use a rough text estimate. Google context-overflow errors are returned as HTTP 400 `invalid_request_error` with `prompt is too long` and the upstream details. A client may still have its own model window setting and counting logic; restarting BabelGate does not compact the conversation stored by the client.
 
 Base64 images inside Anthropic tool results are preserved as multimodal content. Gemini 3 receives images inside their corresponding function responses; earlier Gemini models receive ordinary image parts alongside the responses. Images are not serialized into tool-result text, which can otherwise greatly inflate the input token count.
 
@@ -495,20 +495,24 @@ routing:
 
 ## Unified API Endpoints
 
+Protocol-prefixed endpoints are recommended because they make inbound protocol
+detection unambiguous. The original unprefixed `/v1/...` and `/v1beta/...`
+endpoints remain available as compatibility aliases.
+
 | Endpoint | Methods | Protocol / Format | Description |
 |---|:---:|---|---|
 | `/` | `GET` | HTML / Web | Embedded Web Dashboard & Playground |
 | `/setup` | `GET` | HTML / Web | Client Setup Guide & Integration Snippets |
 | `/api/providers/{name}` | `PUT` | JSON | Enable or disable a provider live (`{"enabled":true}`) |
 | `/api/routing` | `GET`, `PUT`, `POST` | JSON | Read, replace, or reload live routing from the active YAML file |
-| `/v1/messages/count_tokens` | `POST` | Anthropic Token Counting | Count input tokens with the routed provider's native tokenizer when available |
-| `/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint |
-| `/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
-| `/v1/responses` | `POST` | OpenAI Responses | OpenAI SDK and Codex CLI entrypoint (including SSE streaming) |
-| `/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions |
-| `/v1beta/models/{model}:streamGenerateContent` | `POST` | Google Gemini REST (SSE) | Google GenAI streaming completions |
+| `/anthropic/v1/messages/count_tokens` | `POST` | Anthropic Token Counting | Count input tokens with the routed provider's native tokenizer when available |
+| `/anthropic/v1/messages` | `POST` | Anthropic Messages | Claude Code & Anthropic SDK entrypoint (`/claude` alias available) |
+| `/openai/v1/chat/completions` | `POST` | OpenAI Chat Completions | OpenAI SDK, Cursor, OpenWebUI entrypoint |
+| `/openai/v1/responses` | `POST` | OpenAI Responses | OpenAI SDK and Codex CLI entrypoint (including SSE streaming) |
+| `/google/v1beta/models/{model}:generateContent` | `POST` | Google Gemini REST | Google GenAI unary completions (`/gemini` alias available) |
+| `/google/v1beta/models/{model}:streamGenerateContent` | `POST` | Google Gemini REST (SSE) | Google GenAI streaming completions |
 | `/v1/models` | `GET` | OpenAI or Anthropic format | Auto-detects client format or responds with OpenAI models |
-| `/v1beta/models` | `GET` | Google Gemini format | Lists all models in Google Gemini format |
+| `/google/v1beta/models` | `GET` | Google Gemini format | Lists all models in Google Gemini format |
 | `/api/status` | `GET` | JSON | Health check, active providers & routes |
 | `/api/models` | `GET` | JSON | Catalog of all active models and aliases |
 | `/api/sessions` | `GET`, `DELETE` | JSON | Active client sessions & token usage telemetry |

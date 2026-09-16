@@ -34,13 +34,14 @@ func (s *Store) SaveSession(sess *session.Session) error {
 
 	query := `
 	INSERT INTO sessions (
-		id, client, client_ip, user_agent, created_at, last_active,
+		id, client, last_protocol, client_ip, user_agent, created_at, last_active,
 		last_model, request_count, context_tokens, context_tokens_estimated,
 		input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
 		generation_duration_ms, measured_output_tokens, models, model_stats
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		client = excluded.client,
+		last_protocol = excluded.last_protocol,
 		client_ip = excluded.client_ip,
 		user_agent = excluded.user_agent,
 		created_at = excluded.created_at,
@@ -65,7 +66,7 @@ func (s *Store) SaveSession(sess *session.Session) error {
 	defer s.mu.Unlock()
 
 	_, err = s.db.Exec(query,
-		sess.ID, sess.Client, sess.ClientIP, sess.UserAgent,
+		sess.ID, sess.Client, sess.LastProtocol, sess.ClientIP, sess.UserAgent,
 		createdAtStr, lastActiveStr, sess.LastModel,
 		sess.RequestCount, sess.ContextTokens, ctxEst,
 		sess.InputTokens, sess.OutputTokens, sess.CachedInputTokens, sess.ReasoningTokens, sess.TotalTokens,
@@ -100,13 +101,14 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 
 	query := `
 	INSERT INTO session_requests (
-		id, session_id, timestamp, provider, model, stream,
+		id, session_id, timestamp, protocol, provider, model, stream,
 		duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
 		output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		session_id = excluded.session_id,
 		timestamp = excluded.timestamp,
+		protocol = excluded.protocol,
 		provider = excluded.provider,
 		model = excluded.model,
 		stream = excluded.stream,
@@ -127,7 +129,7 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(query,
-		rec.ID, sessionID, tsStr, rec.Provider, rec.Model, streamInt,
+		rec.ID, sessionID, tsStr, rec.Protocol, rec.Provider, rec.Model, streamInt,
 		rec.DurationMs, rec.GenerationDurationMs, rec.InputTokens, inEstInt,
 		rec.OutputTokens, rec.CachedInputTokens, rec.ReasoningTokens, rec.TotalTokens, rec.TokensPerSecond,
 		rec.Status, rec.ErrorMessage,
@@ -154,7 +156,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT id, client, client_ip, user_agent, created_at, last_active,
+		SELECT id, client, last_protocol, client_ip, user_agent, created_at, last_active,
 		       last_model, request_count, context_tokens, context_tokens_estimated,
 		       input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
 		       generation_duration_ms, measured_output_tokens, models, model_stats
@@ -171,7 +173,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	var sessions []*session.Session
 	for rows.Next() {
 		var (
-			id, client, clientIP, userAgent                string
+			id, client, lastProtocol, clientIP, userAgent  string
 			createdAtStr, lastActiveStr                    string
 			lastModel                                      string
 			reqCount, ctxTok, ctxTokEst                    int
@@ -182,7 +184,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			modelsJSON, modelStatsJSON                     string
 		)
 		if err := rows.Scan(
-			&id, &client, &clientIP, &userAgent,
+			&id, &client, &lastProtocol, &clientIP, &userAgent,
 			&createdAtStr, &lastActiveStr,
 			&lastModel,
 			&reqCount, &ctxTok, &ctxTokEst,
@@ -220,6 +222,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 		sess := &session.Session{
 			ID:                     id,
 			Client:                 client,
+			LastProtocol:           lastProtocol,
 			ClientIP:               clientIP,
 			UserAgent:              userAgent,
 			CreatedAt:              createdAt,
@@ -248,7 +251,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 
 	// For each loaded session, query its recent requests
 	reqStmt, err := s.db.Prepare(`
-		SELECT id, timestamp, provider, model, stream,
+		SELECT id, timestamp, protocol, provider, model, stream,
 		       duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
 		       output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
 		FROM session_requests
@@ -269,7 +272,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 
 		for reqRows.Next() {
 			var (
-				reqID, tsStr, provider, model                            string
+				reqID, tsStr, protocol, provider, model                  string
 				streamInt                                                int
 				durMs, genDurMs                                          int64
 				inTok, inTokEst, outTok, cachedTok, reasoningTok, totTok int
@@ -277,7 +280,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 				status, errMsg                                           string
 			)
 			if err := reqRows.Scan(
-				&reqID, &tsStr, &provider, &model, &streamInt,
+				&reqID, &tsStr, &protocol, &provider, &model, &streamInt,
 				&durMs, &genDurMs, &inTok, &inTokEst,
 				&outTok, &cachedTok, &reasoningTok, &totTok, &tps, &status, &errMsg,
 			); err != nil {
@@ -292,6 +295,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			sess.RecentRequests = append(sess.RecentRequests, session.RequestRecord{
 				ID:                   reqID,
 				Timestamp:            ts,
+				Protocol:             protocol,
 				Provider:             provider,
 				Model:                model,
 				Stream:               streamInt != 0,

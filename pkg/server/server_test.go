@@ -477,6 +477,97 @@ func TestModelsCatalogEndpoints(t *testing.T) {
 	}
 }
 
+func TestProtocolNamespacedModelEndpoints(t *testing.T) {
+	handler := setupTestHandler()
+	tests := []struct {
+		path  string
+		field string
+	}{
+		{"/openai/v1/models", "object"},
+		{"/anthropic/v1/models", "data"},
+		{"/claude/v1/models", "data"},
+		{"/google/v1beta/models", "models"},
+		{"/google/v1/models", "models"},
+		{"/gemini/v1beta/models", "models"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s returned %d: %s", tc.path, rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body[tc.field] == nil {
+				t.Fatalf("%s response missing %q: %#v", tc.path, tc.field, body)
+			}
+		})
+	}
+}
+
+func TestProtocolNamespacedGenerationEndpoints(t *testing.T) {
+	handler := setupTestHandler()
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "anthropic canonical",
+			path: "/anthropic/v1/messages",
+			body: `{"model":"claude-3-7-sonnet","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name: "claude alias",
+			path: "/claude/v1/messages",
+			body: `{"model":"claude-3-7-sonnet","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name: "google canonical",
+			path: "/google/v1beta/models/openai/gpt-4o:generateContent",
+			body: `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+		},
+		{
+			name: "gemini alias",
+			path: "/gemini/v1/models/openai/gpt-4o:generateContent",
+			body: `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s returned %d: %s", tc.path, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestLegacyModelsDoesNotTreatGenericAPIKeyAsAnthropic(t *testing.T) {
+	handler := setupTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("x-api-key", "router-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "list" {
+		t.Fatalf("generic x-api-key should retain OpenAI format: %#v", body)
+	}
+}
+
 // TestAnthropicClientSeesGeminiModelsAndCanCallDirectly verifies:
 // 1. Anthropic client querying /v1/models sees Gemini models from the Gemini connector
 // 2. Anthropic client can call POST /v1/messages specifying "gemini-2.5-pro" directly

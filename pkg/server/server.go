@@ -64,27 +64,41 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/api/metrics/speed", dashboardHandler.HandleAPIMetricsSpeed)
 
 	// Anthropic Messages API (Claude Code / Anthropic SDK)
-	mux.HandleFunc("/v1/messages", anthropicHandler.HandleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", anthropicHandler.HandleCountTokens)
-	mux.HandleFunc("/anthropic/v1/messages", anthropicHandler.HandleMessages)
-	mux.HandleFunc("/anthropic/v1/messages/count_tokens", anthropicHandler.HandleCountTokens)
-	mux.HandleFunc("/anthropic/v1/models", anthropicHandler.HandleModels)
+	anthropicMessages := inbound.WithProtocol(inbound.ProtocolAnthropic, anthropicHandler.HandleMessages)
+	anthropicCountTokens := inbound.WithProtocol(inbound.ProtocolAnthropic, anthropicHandler.HandleCountTokens)
+	anthropicModels := inbound.WithProtocol(inbound.ProtocolAnthropic, anthropicHandler.HandleModels)
+	for _, prefix := range []string{"", "/anthropic", "/claude"} {
+		mux.HandleFunc(prefix+"/v1/messages", anthropicMessages)
+		mux.HandleFunc(prefix+"/v1/messages/count_tokens", anthropicCountTokens)
+	}
+	mux.HandleFunc("/anthropic/v1/models", anthropicModels)
+	mux.HandleFunc("/claude/v1/models", anthropicModels)
 
 	// OpenAI Chat Completions and Responses APIs
-	mux.HandleFunc("/v1/chat/completions", openaiHandler.HandleChatCompletions)
-	mux.HandleFunc("/openai/v1/chat/completions", openaiHandler.HandleChatCompletions)
-	mux.HandleFunc("/v1/responses", openaiHandler.HandleResponses)
-	mux.HandleFunc("/openai/v1/responses", openaiHandler.HandleResponses)
-	mux.HandleFunc("/openai/v1/models", openaiHandler.HandleModels)
+	openAIChat := inbound.WithProtocol(inbound.ProtocolOpenAI, openaiHandler.HandleChatCompletions)
+	openAIResponses := inbound.WithProtocol(inbound.ProtocolOpenAI, openaiHandler.HandleResponses)
+	openAIModels := inbound.WithProtocol(inbound.ProtocolOpenAI, openaiHandler.HandleModels)
+	googleModels := inbound.WithProtocol(inbound.ProtocolGoogle, googleHandler.HandleModels)
+	mux.HandleFunc("/v1/chat/completions", openAIChat)
+	mux.HandleFunc("/openai/v1/chat/completions", openAIChat)
+	mux.HandleFunc("/v1/responses", openAIResponses)
+	mux.HandleFunc("/openai/v1/responses", openAIResponses)
+	mux.HandleFunc("/openai/v1/models", openAIModels)
 
 	// Unified models endpoint
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		// If request has Anthropic headers or ?format=anthropic, return Anthropic models format
-		if r.Header.Get("anthropic-version") != "" || r.Header.Get("x-api-key") != "" || r.URL.Query().Get("format") == "anthropic" {
-			anthropicHandler.HandleModels(w, r)
+		format := strings.ToLower(r.URL.Query().Get("format"))
+		// Authentication headers are not generally protocol identifiers. Only
+		// vendor-specific headers participate in legacy endpoint detection.
+		if r.Header.Get("anthropic-version") != "" || format == "anthropic" {
+			anthropicModels(w, r)
 			return
 		}
-		openaiHandler.HandleModels(w, r)
+		if r.Header.Get("x-goog-api-key") != "" || format == "google" || format == "gemini" {
+			googleModels(w, r)
+			return
+		}
+		openAIModels(w, r)
 	})
 
 	// Google Gemini API (v1beta and v1)
@@ -101,9 +115,15 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 		}
 	}
 
-	mux.HandleFunc("/v1beta/models/", googleDispatch)
-	mux.HandleFunc("/v1beta/models", googleHandler.HandleModels)
-	mux.HandleFunc("/v1/models/", googleDispatch)
+	googleRoutes := inbound.WithProtocol(inbound.ProtocolGoogle, googleDispatch)
+	for _, prefix := range []string{"", "/google", "/gemini"} {
+		mux.HandleFunc(prefix+"/v1beta/models/", googleRoutes)
+		mux.HandleFunc(prefix+"/v1beta/models", googleModels)
+		mux.HandleFunc(prefix+"/v1/models/", googleRoutes)
+		if prefix != "" { // /v1/models remains the legacy format dispatcher above.
+			mux.HandleFunc(prefix+"/v1/models", googleModels)
+		}
+	}
 
 	// Wrap middleware chain
 	handler := loggingMiddleware(corsMiddleware(authMiddleware(cfg.Server.APIKey, mux)))
@@ -269,12 +289,16 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		close(stopMonitor)
 
 		duration := time.Since(start)
-		clientName := session.DetectClient(r.Header.Get("x-client"), r.UserAgent())
+		protocol := inbound.ProtocolFromRequest(r)
+		clientName := session.DetectClientForProtocol(r.Header.Get("x-client"), r.UserAgent(), protocol)
 		sessID := inbound.ExtractSessionID(r)
 
 		var clientInfo []string
 		if clientName != "unknown" && clientName != "" {
 			clientInfo = append(clientInfo, "client: "+clientName)
+		}
+		if protocol != "" {
+			clientInfo = append(clientInfo, "protocol: "+protocol)
 		}
 		if sessID != "" {
 			if len(sessID) > 12 {

@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,54 @@ import (
 	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/session"
 )
+
+type inboundProtocolKey struct{}
+
+const (
+	ProtocolAnthropic = "anthropic"
+	ProtocolOpenAI    = "openai"
+	ProtocolGoogle    = "google"
+)
+
+// WithProtocol tags requests handled by a protocol-specific endpoint. Route
+// registration is authoritative; path/header detection is only a fallback for
+// shared legacy endpoints and middleware.
+func WithProtocol(protocol string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), inboundProtocolKey{}, protocol)
+		next(w, r.WithContext(ctx))
+	}
+}
+
+// ProtocolFromRequest returns the inbound wire protocol used by the client.
+func ProtocolFromRequest(r *http.Request) string {
+	if protocol, ok := r.Context().Value(inboundProtocolKey{}).(string); ok {
+		return protocol
+	}
+
+	path := r.URL.Path
+	switch {
+	case strings.HasPrefix(path, "/anthropic/"), strings.HasPrefix(path, "/claude/"),
+		path == "/v1/messages", strings.HasPrefix(path, "/v1/messages/"):
+		return ProtocolAnthropic
+	case strings.HasPrefix(path, "/openai/"), path == "/v1/chat/completions", path == "/v1/responses":
+		return ProtocolOpenAI
+	case strings.HasPrefix(path, "/google/"), strings.HasPrefix(path, "/gemini/"),
+		path == "/v1beta/models", strings.HasPrefix(path, "/v1beta/models/"), strings.HasPrefix(path, "/v1/models/"):
+		return ProtocolGoogle
+	case path == "/v1/models":
+		format := strings.ToLower(r.URL.Query().Get("format"))
+		if format == ProtocolAnthropic || r.Header.Get("anthropic-version") != "" {
+			return ProtocolAnthropic
+		}
+		if format == ProtocolGoogle || format == "gemini" || r.Header.Get("x-goog-api-key") != "" {
+			return ProtocolGoogle
+		}
+		return ProtocolOpenAI
+	default:
+		return ""
+	}
+}
 
 func executedTrackingModel(engine *router.Engine, tr *trace.RequestTrace, requestedModel string) (string, string) {
 	if tr != nil {
@@ -126,8 +175,9 @@ func ResolveSession(sessions *session.Manager, r *http.Request) *session.Session
 	sessID := ExtractSessionID(r)
 	clientIP := ExtractClientIP(r)
 	clientHeader := r.Header.Get("x-client")
-	clientName := session.DetectClient(clientHeader, r.UserAgent())
-	return sessions.GetOrCreate(sessID, clientIP, r.UserAgent(), clientName)
+	protocol := ProtocolFromRequest(r)
+	clientName := session.DetectClientForProtocol(clientHeader, r.UserAgent(), protocol)
+	return sessions.GetOrCreateWithProtocol(sessID, clientIP, r.UserAgent(), clientName, protocol)
 }
 
 // StreamUsageTracker maintains input, output, and total token accounting for streaming requests.
