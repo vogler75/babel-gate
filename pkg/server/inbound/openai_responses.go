@@ -105,13 +105,13 @@ func recordResponsesRequest(h *OpenAIHandler, sess *session.Session, provider, m
 	if sess == nil || h.sessions == nil {
 		return
 	}
-	h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+	recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 		Provider: provider, Model: model, Stream: stream,
 		DurationMs: time.Since(started).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(started)),
 		InputTokens: in, InputTokensEstimated: inEstimated, OutputTokens: out,
 		CachedInputTokens: cached, ReasoningTokens: reasoning, TotalTokens: total,
 		Status: status, ErrorMessage: errMessage,
-	})
+	}, tr)
 }
 
 type responsesStreamItem struct {

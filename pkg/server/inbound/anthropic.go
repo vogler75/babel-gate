@@ -347,12 +347,13 @@ func (h *AnthropicHandler) handlePassthrough(
 		upReq.Header.Set("Accept", "text/event-stream")
 	}
 
+	tr := trace.FromContext(r.Context())
 	upResp, err := anthClient.HTTPClient().Do(upReq)
 	if err != nil {
 		if sess != nil && h.sessions != nil {
 			prov := anthClient.Name()
 			trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               req.Stream,
@@ -360,7 +361,7 @@ func (h *AnthropicHandler) handlePassthrough(
 				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
-			})
+			}, tr)
 		}
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
@@ -382,7 +383,6 @@ func (h *AnthropicHandler) handlePassthrough(
 	var upstreamUsage anthropic.Usage
 	estInTokens := session.EstimateTokens(string(upstreamBody))
 
-	tr := trace.FromContext(r.Context())
 	if req.Stream {
 		flusher, isFlusher := w.(http.Flusher)
 		reader := bufio.NewReader(upResp.Body)
@@ -467,7 +467,7 @@ func (h *AnthropicHandler) handlePassthrough(
 	if sess != nil && h.sessions != nil {
 		prov := anthClient.Name()
 		trackingModel := prov + "/" + strings.TrimPrefix(req.Model, prov+"/")
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+		recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 			Provider:             prov,
 			Model:                trackingModel,
 			Stream:               req.Stream,
@@ -478,7 +478,7 @@ func (h *AnthropicHandler) handlePassthrough(
 			OutputTokens:         outTokens,
 			TotalTokens:          totalTokens,
 			Status:               status,
-		})
+		}, tr)
 	}
 }
 
@@ -495,7 +495,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 
 	if err != nil {
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               false,
@@ -504,7 +504,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
-			})
+			}, tr)
 		}
 		writeAnthropicError(w, err)
 		return
@@ -530,7 +530,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 	}
 
 	if sess != nil && h.sessions != nil {
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+		recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 			Provider:             prov,
 			Model:                trackingModel,
 			Stream:               false,
@@ -542,7 +542,7 @@ func (h *AnthropicHandler) handleNonStreaming(w http.ResponseWriter, r *http.Req
 			ReasoningTokens:      resp.Usage.ReasoningTokens,
 			TotalTokens:          totalTokens,
 			Status:               "success",
-		})
+		}, tr)
 	}
 
 	anthResp, err := anthropic.ToAnthropicResponse(resp)
@@ -569,7 +569,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               true,
@@ -578,7 +578,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
-			})
+			}, tr)
 		}
 		writeAnthropicError(w, err)
 		return
@@ -616,7 +616,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               true,
@@ -630,7 +630,7 @@ func (h *AnthropicHandler) handleStreaming(w http.ResponseWriter, r *http.Reques
 				TotalTokens:          usageTracker.TotalTokens,
 				Status:               streamStatus,
 				ErrorMessage:         streamErr,
-			})
+			}, tr)
 		}
 	}()
 

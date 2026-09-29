@@ -309,6 +309,11 @@ func (t *TUI) handleKey(key string) bool {
 			} else {
 				log.Printf("[TUI] routes reloaded from configuration")
 			}
+			if err := t.engine.ReloadSmart(); err != nil {
+				log.Printf("[TUI] failed to reload smart config: %v", err)
+			} else {
+				log.Printf("[TUI] smart config reloaded from configuration")
+			}
 		}
 		t.updateSize()
 
@@ -420,6 +425,45 @@ func (t *TUI) render() {
 	sb.WriteString(t.renderBoxLine(statusLine, width))
 	sb.WriteString("\r\n")
 
+	hasSmartLine := false
+	if t.engine != nil && t.engine.IsSmartModel("smart") {
+		hasSmartLine = true
+		stats := t.engine.GetSmartStats()
+		cfg := t.engine.GetSmartConfig()
+		mode := cfg.Classifier.Mode
+		if mode == "" {
+			mode = "heuristic"
+		}
+		cooldowns := t.engine.GetSmartCooldowns()
+		cdText := "none"
+		if len(cooldowns) > 0 {
+			var cdParts []string
+			for p, s := range cooldowns {
+				cdParts = append(cdParts, fmt.Sprintf("%s %ds", p, s))
+			}
+			cdText = colorYellow + colorBold + "⏸ " + strings.Join(cdParts, ", ") + colorReset
+		}
+
+		simp := stats.TierCounts["simple"]
+		med := stats.TierCounts["medium"]
+		cplx := stats.TierCounts["complex"]
+		rsng := stats.TierCounts["reasoning"]
+
+		smartLine := fmt.Sprintf(" Smart: %s%s%s (%s, sticky=%s) │ %s%d%s reqs (avg %s%.1fms%s) │ %sS:%d%s %sM:%d%s %sC:%d%s %sR:%d%s │ Cooling: %s",
+			colorMagenta+colorBold, "ACTIVE", colorReset,
+			mode, cfg.Sticky,
+			colorCyan+colorBold, stats.TotalRequests, colorReset,
+			colorYellow, stats.AvgDecisionMs, colorReset,
+			colorGreen, simp, colorReset,
+			colorBlue, med, colorReset,
+			colorMagenta, cplx, colorReset,
+			colorYellow, rsng, colorReset,
+			cdText,
+		)
+		sb.WriteString(t.renderBoxLine(smartLine, width))
+		sb.WriteString("\r\n")
+	}
+
 	// 2. Focusable Providers and Sessions panes
 	providerLines := t.getSortedProvidersInfo()
 	providerCount := len(providerLines)
@@ -434,7 +478,11 @@ func (t *TUI) render() {
 
 	// Reserve one row for each pane and distribute remaining space, keeping a
 	// useful log area even on smaller terminals.
-	availableContent := t.rows - 7
+	extraStatusRows := 0
+	if hasSmartLine {
+		extraStatusRows = 1
+	}
+	availableContent := t.rows - (7 + extraStatusRows)
 	providerHeight, sessionHeight := 1, 1
 	remaining := availableContent - 5 // reserve at least three rows for logs when possible
 	maxProviderHeight := minInt(maxInt(1, providerCount), 5)
@@ -491,7 +539,7 @@ func (t *TUI) render() {
 
 	// Calculate log box height dynamically:
 	// Frame overhead: border/status + three dividers + provider/session rows + bottom/footer.
-	fixedRows := 7 + len(providerLines) + len(sessionLines)
+	fixedRows := 7 + extraStatusRows + len(providerLines) + len(sessionLines)
 	logHeight := t.rows - fixedRows
 	if logHeight < 1 {
 		logHeight = 1
@@ -595,8 +643,14 @@ func (t *TUI) getSortedProvidersInfo() []string {
 		statusColor := colorDim
 		status := "○ Disabled"
 		if state.Enabled {
-			statusColor = colorGreen
-			status = "● Enabled "
+			if t.engine != nil && t.engine.GetProviderCooldown(state.Name) > 0 {
+				rem := int(t.engine.GetProviderCooldown(state.Name).Seconds())
+				statusColor = colorYellow + colorBold
+				status = fmt.Sprintf("⏸ Cool %ds", rem)
+			} else {
+				statusColor = colorGreen
+				status = "● Enabled "
+			}
 		}
 		line := fmt.Sprintf(" %s %s[Prio %d]%s %s%-9s%s (%s) %s%s%s (%d models) %s%s%s",
 			selector,
@@ -634,7 +688,13 @@ func (t *TUI) getSessionsInfo(limit int) []string {
 			age = 0
 		}
 		model := "-"
-		if sess.LastModel != "" {
+		if sess.LastTier != "" {
+			tierPill := "[" + sess.LastTier[:minInt(4, len(sess.LastTier))] + "]"
+			model = "smart" + tierPill
+			if sess.LastModel != "" {
+				model += "→" + sess.LastModel
+			}
+		} else if sess.LastModel != "" {
 			model = sess.LastModel
 		} else if len(sess.RecentRequests) > 0 && sess.RecentRequests[0].Model != "" {
 			model = sess.RecentRequests[0].Model
@@ -799,6 +859,16 @@ func colorizeLogLine(line string) string {
 		if idx != -1 && len(line) >= idx+12 {
 			line = line[:idx+11] + colorReset + line[idx+11:]
 		}
+	}
+
+	if strings.Contains(line, "[SMART]") {
+		line = strings.Replace(line, "[SMART]", colorMagenta+colorBold+"[SMART]"+colorReset, 1)
+	}
+	if strings.Contains(line, "smart ") {
+		line = strings.Replace(line, "smart simple", colorGreen+"smart simple"+colorReset, 1)
+		line = strings.Replace(line, "smart medium", colorBlue+"smart medium"+colorReset, 1)
+		line = strings.Replace(line, "smart complex", colorMagenta+"smart complex"+colorReset, 1)
+		line = strings.Replace(line, "smart reasoning", colorYellow+"smart reasoning"+colorReset, 1)
 	}
 
 	if len(line) >= 19 && line[4] == '/' && line[7] == '/' && line[10] == ' ' && line[13] == ':' {

@@ -116,6 +116,68 @@ func (d *DashboardHandler) HandleAPIRouting(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(map[string]any{"routing": d.engine.GetRouting(), "persisted": persisted})
 }
 
+func (d *DashboardHandler) HandleAPISmart(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet {
+		cfg, hasKey := d.engine.GetSmartMasked()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"config":      cfg,
+			"has_api_key": hasKey,
+			"runtime": map[string]any{
+				"enabled":   d.engine.IsSmartModel("smart"),
+				"cooldowns": d.engine.GetSmartCooldowns(),
+			},
+			"stats": d.engine.GetSmartStats(),
+		})
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := d.engine.ReloadSmart(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg, hasKey := d.engine.GetSmartMasked()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"config":      cfg,
+			"has_api_key": hasKey,
+			"reloaded":    true,
+			"runtime": map[string]any{
+				"enabled":   d.engine.IsSmartModel("smart"),
+				"cooldowns": d.engine.GetSmartCooldowns(),
+			},
+			"stats": d.engine.GetSmartStats(),
+		})
+		return
+	}
+	if r.Method != http.MethodPut {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPut+", "+http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var smartCfg config.SmartConfig
+	if err := json.NewDecoder(r.Body).Decode(&smartCfg); err != nil {
+		http.Error(w, "invalid smart config JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	persisted, err := d.engine.SetSmart(smartCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cfg, hasKey := d.engine.GetSmartMasked()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"config":      cfg,
+		"has_api_key": hasKey,
+		"persisted":   persisted,
+		"runtime": map[string]any{
+			"enabled":   d.engine.IsSmartModel("smart"),
+			"cooldowns": d.engine.GetSmartCooldowns(),
+		},
+		"stats": d.engine.GetSmartStats(),
+	})
+}
+
 func (d *DashboardHandler) HandleAPIModels(w http.ResponseWriter, r *http.Request) {
 	models, err := d.catalog.ListAll(r.Context())
 	if err != nil {
@@ -393,6 +455,10 @@ const dashboardHTML = `<!DOCTYPE html>
     .pill-cohere { background: #14b8a622; color: #2dd4bf; border: 1px solid #14b8a6; }
     .pill-alias { background: #a371f722; color: #bc8cff; border: 1px solid #8957e5; }
     .pill-default { background: #388bfd1a; color: #79c0ff; border: 1px solid #388bfd66; }
+    .pill-tier-simple { background: #23863622; color: #3fb950; border: 1px solid #238636; }
+    .pill-tier-medium { background: #388bfd22; color: #58a6ff; border: 1px solid #388bfd; }
+    .pill-tier-complex { background: #a371f722; color: #bc8cff; border: 1px solid #8957e5; }
+    .pill-tier-reasoning { background: #d2992222; color: #e3b341; border: 1px solid #d29922; }
     .model-pct { font-size: 0.72rem; opacity: 0.9; margin-left: 0.3rem; font-weight: 700; background: rgba(0,0,0,0.25); padding: 0.05rem 0.25rem; border-radius: 3px; }
     .last-tag { display: inline-block; background: #238636; color: #ffffff; border-radius: 3px; font-size: 0.65rem; padding: 0.05rem 0.3rem; margin-left: 0.35rem; line-height: 1.2; font-weight: 700; letter-spacing: 0.02em; vertical-align: middle; }
     
@@ -744,6 +810,132 @@ const dashboardHTML = `<!DOCTYPE html>
         <button onclick="saveRouting()">Save Routes</button>
         <button class="btn-sm" onclick="reloadRouting()">↻ Reload from YAML</button>
         <span id="routingStatus" class="muted"></span>
+      </div>
+    </div>
+
+    <!-- Smart Model & Decision Router Configuration -->
+    <div class="card" style="margin-bottom: 1.75rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div>
+          <h2 style="margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem;">
+            🧠 Smart Model & Decision Router <span class="badge" id="smartStatusBadge">Loading...</span>
+          </h2>
+          <div style="font-size: 0.78rem; color: #8b949e;">
+            Virtual <code>smart</code> model classifies request complexity into simple, medium, complex, or reasoning tiers.
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <button class="btn-sm" onclick="loadSmartData()">↻ Refresh Stats</button>
+        </div>
+      </div>
+
+      <!-- Smart Telemetry KPI Strip -->
+      <div class="stats-grid" style="margin-bottom: 1rem; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));">
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Smart Requests</div>
+          <div class="stat-val stat-in" id="smartKpiRequests" style="font-size: 1.35rem;">0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Avg Decision Time</div>
+          <div class="stat-val stat-out" id="smartKpiAvgDecision" style="font-size: 1.35rem;">0ms</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Decisions (Pri / Fall)</div>
+          <div class="stat-val" id="smartKpiDecisions" style="font-size: 1.25rem;">0 / 0</div>
+        </div>
+        <div class="stat-card" style="padding: 0.65rem 0.9rem; background: #0c1017;">
+          <div class="stat-title">Sticky Turn Reuses</div>
+          <div class="stat-val stat-total" id="smartKpiSticky" style="font-size: 1.35rem;">0</div>
+        </div>
+      </div>
+
+      <!-- Tier Distribution Bar & Cooldown Alert -->
+      <div style="background: #11151c; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 0.4rem;">
+          <span style="color: #8b949e; font-weight: 600;">TIER DISTRIBUTION:</span>
+          <span id="smartTierCountsSummary" style="color: #c9d1d9;"></span>
+        </div>
+        <div id="smartTierProgressBar" style="display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: #21262d; width: 100%;">
+          <div id="barTierSimple" style="background: #3fb950; width: 0%;" title="Simple"></div>
+          <div id="barTierMedium" style="background: #58a6ff; width: 0%;" title="Medium"></div>
+          <div id="barTierComplex" style="background: #bc8cff; width: 0%;" title="Complex"></div>
+          <div id="barTierReasoning" style="background: #e3b341; width: 0%;" title="Reasoning"></div>
+        </div>
+        <div id="smartCooldownsNotice" style="margin-top: 0.6rem; font-size: 0.78rem; display: none;"></div>
+      </div>
+
+      <!-- Smart Configuration Form -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-bottom: 1rem;">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="smartMode">Classifier Mode</label>
+          <select id="smartMode" onchange="onSmartModeChange()">
+            <option value="heuristic">Heuristic (Built-in Go)</option>
+            <option value="laya">Laya Serve (Local ML)</option>
+            <option value="http">HTTP Endpoint (Custom)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 0;" id="smartUrlGroup">
+          <label for="smartUrl">Endpoint URL</label>
+          <input id="smartUrl" placeholder="http://localhost:8000">
+        </div>
+        <div class="form-group" style="margin-bottom: 0;" id="smartModelGroup">
+          <label for="smartModel">Laya Model Checkpoint</label>
+          <input id="smartModel" placeholder="multilingual (or english, typed-decisions)">
+        </div>
+        <div class="form-group" style="margin-bottom: 0;" id="smartApiKeyGroup">
+          <label for="smartApiKey">Laya API Key (Optional)</label>
+          <input id="smartApiKey" type="password" placeholder="••••••••">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1rem;">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="smartSticky">Sticky Turns</label>
+          <select id="smartSticky">
+            <option value="turn">Turn (Agent Loop Safe)</option>
+            <option value="none">None (Per-request)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="smartCooldown">Cooldown (Seconds)</label>
+          <input id="smartCooldown" type="number" value="60" min="5" max="3600">
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="smartMinConf">Min Confidence (0.0-1.0)</label>
+          <input id="smartMinConf" type="number" step="0.05" min="0" max="1" value="0.6">
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="smartTimeout">Timeout (ms)</label>
+          <input id="smartTimeout" type="number" value="1000" min="50" max="10000">
+        </div>
+      </div>
+
+      <div style="margin: 1rem 0 0.5rem; font-weight: 600; font-size: 0.9rem; color: #f0f6fc;">
+        Tier Target Models (Ordered comma-separated list, e.g. <code>provider/model, provider2/model2</code>)
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.75rem;">
+        <div class="form-group" style="margin-bottom: 0.5rem;">
+          <label style="color: #3fb950; font-weight: 600;">🟢 Simple Tier (quick, typos, renames, format)</label>
+          <input id="tierSimple" placeholder="e.g. copilot/claude-haiku-4-5, google/gemini-2.5-flash">
+        </div>
+        <div class="form-group" style="margin-bottom: 0.5rem;">
+          <label style="color: #58a6ff; font-weight: 600;">🔵 Medium Tier (small single-file edits)</label>
+          <input id="tierMedium" placeholder="e.g. copilot/claude-sonnet-5, openai/gpt-4o">
+        </div>
+        <div class="form-group" style="margin-bottom: 0.5rem;">
+          <label style="color: #bc8cff; font-weight: 600;">🟣 Complex Tier (feature implementation, refactoring, debug)</label>
+          <input id="tierComplex" placeholder="e.g. copilot/claude-sonnet-5, sdc/gpt-6-sol">
+        </div>
+        <div class="form-group" style="margin-bottom: 0.5rem;">
+          <label style="color: #e3b341; font-weight: 600;">🟡 Reasoning Tier (architecture, root cause, concurrency)</label>
+          <input id="tierReasoning" placeholder="e.g. copilot/claude-opus-5-5, google/gemini-2.5-pro">
+        </div>
+      </div>
+
+      <div style="display:flex; align-items:center; gap:.75rem; margin-top:1rem;">
+        <button onclick="saveSmartConfig()">Save Smart Config</button>
+        <button class="btn-sm" onclick="reloadSmartConfig()">↻ Reload from YAML</button>
+        <span id="smartSaveStatus" class="muted"></span>
       </div>
     </div>
 
@@ -1236,18 +1428,32 @@ const dashboardHTML = `<!DOCTYPE html>
           if (s.recent_requests && s.recent_requests.length > 0) {
             requestsHtml = '<table class="sub-table">' +
               '<thead><tr>' +
-              '<th>Time</th><th>Model</th><th>Type</th><th>Duration</th><th>Input Tokens</th><th>Output Tokens</th><th>Output Speed</th><th>Total</th><th>Status</th>' +
+              '<th>Time</th><th>Model</th><th>Tier / Route</th><th>Type</th><th>Duration</th><th>Input Tokens</th><th>Output Tokens</th><th>Output Speed</th><th>Total</th><th>Status</th>' +
               '</tr></thead><tbody>' +
               s.recent_requests.map(r => {
                 const statusColor = r.status === 'success' ? '#3fb950' : '#f85149';
                 const typeBadge = (r.protocol ? '<span class="pill ' + getProviderPillClass(r.protocol) + '" style="margin-right:0.25rem;">' + escapeHtml(r.protocol) + '</span>' : '') +
                   (r.stream ? '<span class="badge">stream</span>' : '<span class="badge">sync</span>');
                 const timeStr = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '';
+
+                let tierBadge = '<span style="color:#8b949e;">—</span>';
+                if (r.tier) {
+                  const tierClass = 'pill-tier-' + r.tier.toLowerCase();
+                  const tip = r.smart_reason ? (r.smart_reason + ' (' + (r.smart_duration_ms || 0) + 'ms)') : (r.tier + ' tier');
+                  tierBadge = '<span class="pill ' + tierClass + '" title="' + escapeHtml(tip) + '">' + escapeHtml(r.tier.toUpperCase()) + (r.smart_duration_ms > 0 ? ' <span style="font-size:0.7em; opacity:0.8;">' + r.smart_duration_ms + 'ms</span>' : '') + '</span>';
+                }
+
+                let durationTip = r.duration_ms + 'ms total';
+                if (r.smart_duration_ms > 0) {
+                  durationTip += ' (smart decision: ' + r.smart_duration_ms + 'ms)';
+                }
+
                 return '<tr>' +
                   '<td>' + escapeHtml(timeStr) + '</td>' +
-                  '<td><code>' + escapeHtml(r.model) + '</code></td>' +
+                  '<td><code>' + escapeHtml(r.model) + '</code>' + (r.requested_model && r.requested_model !== r.model ? ' <span class="muted" style="font-size:0.75rem;">(' + escapeHtml(r.requested_model) + ')</span>' : '') + '</td>' +
+                  '<td>' + tierBadge + '</td>' +
                   '<td>' + typeBadge + '</td>' +
-                  '<td>' + r.duration_ms + 'ms</td>' +
+                  '<td title="' + escapeHtml(durationTip) + '">' + r.duration_ms + 'ms</td>' +
                   '<td><span class="token-in">' + formatNumber(r.input_tokens) + '</span></td>' +
                   '<td><span class="token-out">' + formatNumber(r.output_tokens) + '</span></td>' +
                   '<td><strong style="color:#7ee787; white-space:nowrap;">' + formatTokensPerSecond(r.tokens_per_second) + '</strong></td>' +
@@ -1827,6 +2033,196 @@ const dashboardHTML = `<!DOCTYPE html>
         // Refresh sessions and analytics immediately
         loadSessions();
         loadAnalytics();
+      }
+    }
+
+    // ----------------------------------------------------
+    // Smart Model & Decision Router
+    // ----------------------------------------------------
+    let currentSmartConfig = null;
+
+    function onSmartModeChange() {
+      const mode = document.getElementById('smartMode').value;
+      const urlGroup = document.getElementById('smartUrlGroup');
+      const modelGroup = document.getElementById('smartModelGroup');
+      const apiKeyGroup = document.getElementById('smartApiKeyGroup');
+
+      if (mode === 'heuristic') {
+        urlGroup.style.opacity = '0.5';
+        modelGroup.style.opacity = '0.5';
+        apiKeyGroup.style.opacity = '0.5';
+      } else if (mode === 'http') {
+        urlGroup.style.opacity = '1';
+        modelGroup.style.opacity = '0.5';
+        apiKeyGroup.style.opacity = '0.5';
+      } else { // laya
+        urlGroup.style.opacity = '1';
+        modelGroup.style.opacity = '1';
+        apiKeyGroup.style.opacity = '1';
+      }
+    }
+
+    async function loadSmartData() {
+      try {
+        const res = await fetch('/api/smart').then(r => r.json());
+        currentSmartConfig = res.config || {};
+        const stats = res.stats || {};
+        const runtime = res.runtime || {};
+
+        // 1. Status badge
+        const badge = document.getElementById('smartStatusBadge');
+        if (runtime.enabled) {
+          const mode = (currentSmartConfig.classifier && currentSmartConfig.classifier.mode) || 'heuristic';
+          badge.textContent = 'Active (' + mode + ')';
+          badge.style.color = '#3fb950';
+          badge.style.borderColor = '#238636';
+        } else {
+          badge.textContent = 'Disabled';
+          badge.style.color = '#8b949e';
+          badge.style.borderColor = 'var(--border)';
+        }
+
+        // 2. Telemetry KPIs
+        document.getElementById('smartKpiRequests').textContent = formatNumber(stats.total_requests || 0);
+        document.getElementById('smartKpiAvgDecision').textContent = (stats.avg_decision_ms !== undefined ? stats.avg_decision_ms.toFixed(1) : '0') + 'ms';
+        document.getElementById('smartKpiDecisions').textContent = formatNumber(stats.primary_decisions || 0) + ' / ' + formatNumber(stats.fallback_decisions || 0);
+        document.getElementById('smartKpiSticky').textContent = formatNumber(stats.sticky_reuses || 0);
+
+        // 3. Tier Distribution Bar
+        const tiers = stats.tier_counts || {};
+        const simp = tiers.simple || 0;
+        const med = tiers.medium || 0;
+        const cplx = tiers.complex || 0;
+        const rsng = tiers.reasoning || 0;
+        const totalTiers = simp + med + cplx + rsng;
+
+        const summaryEl = document.getElementById('smartTierCountsSummary');
+        summaryEl.innerHTML = '<span style="color:#3fb950;">Simple: ' + simp + '</span> · ' +
+          '<span style="color:#58a6ff;">Med: ' + med + '</span> · ' +
+          '<span style="color:#bc8cff;">Cplx: ' + cplx + '</span> · ' +
+          '<span style="color:#e3b341;">Rsng: ' + rsng + '</span>';
+
+        if (totalTiers > 0) {
+          document.getElementById('barTierSimple').style.width = ((simp / totalTiers) * 100).toFixed(1) + '%';
+          document.getElementById('barTierMedium').style.width = ((med / totalTiers) * 100).toFixed(1) + '%';
+          document.getElementById('barTierComplex').style.width = ((cplx / totalTiers) * 100).toFixed(1) + '%';
+          document.getElementById('barTierReasoning').style.width = ((rsng / totalTiers) * 100).toFixed(1) + '%';
+        } else {
+          document.getElementById('barTierSimple').style.width = '0%';
+          document.getElementById('barTierMedium').style.width = '0%';
+          document.getElementById('barTierComplex').style.width = '0%';
+          document.getElementById('barTierReasoning').style.width = '0%';
+        }
+
+        // 4. Cooldown Notice
+        const cdNotice = document.getElementById('smartCooldownsNotice');
+        const cooldowns = runtime.cooldowns || {};
+        const cdKeys = Object.keys(cooldowns);
+        if (cdKeys.length > 0) {
+          const items = cdKeys.map(k => '<strong>' + escapeHtml(k) + '</strong> (' + cooldowns[k] + 's remaining)').join(', ');
+          cdNotice.innerHTML = '⏸ <span style="color:#e3b341; font-weight:600;">Cooling Providers:</span> ' + items;
+          cdNotice.style.display = 'block';
+        } else {
+          cdNotice.style.display = 'none';
+        }
+
+        // 5. Populate Form Fields (only if not actively focused by user)
+        if (document.activeElement && document.activeElement.closest && document.activeElement.closest('.card') && document.activeElement.id && document.activeElement.id.startsWith('smart')) {
+          // User is typing, skip overwriting form
+        } else {
+          const clf = currentSmartConfig.classifier || {};
+          if (clf.mode) document.getElementById('smartMode').value = clf.mode;
+          if (clf.url !== undefined) document.getElementById('smartUrl').value = clf.url || '';
+          if (clf.model !== undefined) document.getElementById('smartModel').value = clf.model || '';
+          if (res.has_api_key) {
+            document.getElementById('smartApiKey').placeholder = '•••••••• (configured)';
+          } else {
+            document.getElementById('smartApiKey').placeholder = 'optional bearer token';
+          }
+          if (currentSmartConfig.sticky) document.getElementById('smartSticky').value = currentSmartConfig.sticky;
+          if (currentSmartConfig.cooldown_seconds !== undefined) document.getElementById('smartCooldown').value = currentSmartConfig.cooldown_seconds;
+          if (clf.min_confidence !== undefined) document.getElementById('smartMinConf').value = clf.min_confidence;
+          if (clf.timeout_ms !== undefined) document.getElementById('smartTimeout').value = clf.timeout_ms;
+
+          const tMap = currentSmartConfig.tiers || {};
+          document.getElementById('tierSimple').value = (tMap.simple || []).join(', ');
+          document.getElementById('tierMedium').value = (tMap.medium || []).join(', ');
+          document.getElementById('tierComplex').value = (tMap.complex || []).join(', ');
+          document.getElementById('tierReasoning').value = (tMap.reasoning || []).join(', ');
+          onSmartModeChange();
+        }
+      } catch (err) {
+        console.error('Failed to load smart config:', err);
+      }
+    }
+
+    async function saveSmartConfig() {
+      const status = document.getElementById('smartSaveStatus');
+      status.textContent = 'Saving…';
+
+      const mode = document.getElementById('smartMode').value;
+      const url = document.getElementById('smartUrl').value.trim();
+      const model = document.getElementById('smartModel').value.trim();
+      const apiKey = document.getElementById('smartApiKey').value.trim();
+      const sticky = document.getElementById('smartSticky').value;
+      const cooldown = parseInt(document.getElementById('smartCooldown').value, 10) || 60;
+      const minConf = parseFloat(document.getElementById('smartMinConf').value) || 0.6;
+      const timeoutMs = parseInt(document.getElementById('smartTimeout').value, 10) || 1000;
+
+      const parseTiers = (val) => val.split(',').map(s => s.trim()).filter(Boolean);
+      const tiers = {
+        simple: parseTiers(document.getElementById('tierSimple').value),
+        medium: parseTiers(document.getElementById('tierMedium').value),
+        complex: parseTiers(document.getElementById('tierComplex').value),
+        reasoning: parseTiers(document.getElementById('tierReasoning').value)
+      };
+
+      const payload = {
+        classifier: {
+          mode: mode,
+          url: url,
+          model: model,
+          timeout_ms: timeoutMs,
+          min_confidence: minConf
+        },
+        sticky: sticky,
+        cooldown_seconds: cooldown,
+        tiers: tiers
+      };
+      if (apiKey) {
+        payload.classifier.api_key = apiKey;
+      } else if (document.getElementById('smartApiKey').placeholder.startsWith('••••••••')) {
+        payload.classifier.api_key = '••••••••';
+      }
+
+      try {
+        const res = await fetch('/api/smart', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        status.textContent = data.persisted ? 'Saved & persisted to YAML ✓' : 'Updated for current session ✓';
+        document.getElementById('smartApiKey').value = '';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+        await loadSmartData();
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function reloadSmartConfig() {
+      const status = document.getElementById('smartSaveStatus');
+      status.textContent = 'Reloading…';
+      try {
+        const res = await fetch('/api/smart', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        status.textContent = 'Reloaded from YAML ✓';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+        await loadSmartData();
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
       }
     }
 
@@ -2575,12 +2971,16 @@ const dashboardHTML = `<!DOCTYPE html>
 
     // Initial load
     loadData();
+    loadSmartData();
     loadSessions();
     loadAnalytics();
     loadSpeedMetrics();
 
-    // Auto-refresh sessions every 4 seconds
-    setInterval(loadSessions, 4000);
+    // Auto-refresh sessions and smart metrics every 4 seconds
+    setInterval(() => {
+      loadSessions();
+      loadSmartData();
+    }, 4000);
   </script>
 </body>
 </html>

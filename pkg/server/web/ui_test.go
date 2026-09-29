@@ -260,6 +260,12 @@ func TestDashboardHandler_MetricsEndpoints(t *testing.T) {
 	if !contains(html, "modelProviderFilter") || !contains(html, "modelNameFilter") || !contains(html, "filteredCatalogModels") {
 		t.Errorf("expected provider and name filters for the model catalog")
 	}
+	if !contains(html, "Smart Model & Decision Router") || !contains(html, "loadSmartData") {
+		t.Errorf("expected Smart Model & Decision Router card in dashboard HTML")
+	}
+	if !contains(html, "saveSmartConfig") || !contains(html, "barTierReasoning") {
+		t.Errorf("expected Smart Model configuration form and tier distribution bar in dashboard HTML")
+	}
 }
 
 func contains(s, substr string) bool {
@@ -449,5 +455,64 @@ func TestDashboardHandler_ProviderTogglePersists(t *testing.T) {
 	}
 	if !contains(string(data), "enabled: true") {
 		t.Fatalf("provider state was not persisted:\n%s", data)
+	}
+}
+
+func TestDashboardHandler_SmartAPI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	initial := "providers:\n  openai:\n    type: openai\n  google:\n    type: google\nsmart:\n  classifier:\n    mode: heuristic\n  tiers:\n    simple:\n      - openai/gpt-4o-mini\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewDashboardHandler(engine, router.NewCatalog(engine), nil, nil)
+
+	// 1. GET /api/smart
+	req := httptest.NewRequest(http.MethodGet, "/api/smart", nil)
+	w := httptest.NewRecorder()
+	handler.HandleAPISmart(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var getResp struct {
+		Config  config.SmartConfig `json:"config"`
+		Runtime struct {
+			Enabled bool `json:"enabled"`
+		} `json:"runtime"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&getResp); err != nil {
+		t.Fatalf("failed to decode get response: %v", err)
+	}
+	if !getResp.Runtime.Enabled {
+		t.Fatal("expected smart to be enabled")
+	}
+
+	// 2. PUT /api/smart
+	putBody := `{"classifier":{"mode":"laya","url":"http://localhost:8000"},"sticky":"turn","cooldown_seconds":45,"tiers":{"simple":["openai/gpt-4o-mini"],"complex":["google/gemini-2.5-pro"]}}`
+	req = httptest.NewRequest(http.MethodPut, "/api/smart", bytes.NewReader([]byte(putBody)))
+	w = httptest.NewRecorder()
+	handler.HandleAPISmart(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	activeCfg := engine.GetSmartConfig()
+	if activeCfg.Classifier.Mode != "laya" || activeCfg.CooldownSeconds != 45 {
+		t.Fatalf("unexpected active smart config: %+v", activeCfg)
+	}
+
+	// 3. POST /api/smart (reload)
+	req = httptest.NewRequest(http.MethodPost, "/api/smart", nil)
+	w = httptest.NewRecorder()
+	handler.HandleAPISmart(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 }

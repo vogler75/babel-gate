@@ -344,3 +344,43 @@ func TestHorizontalScrollKeyHandling(t *testing.T) {
 		t.Fatalf("down at log bottom should restore auto-scroll, pos=%d auto=%v", app.scrollPos, app.autoScroll)
 	}
 }
+
+func TestTUISmartLineAndCoolingDisplay(t *testing.T) {
+	cfg := &config.Config{
+		Database: config.DatabaseConfig{Path: t.TempDir() + "/metrics.db"},
+		Providers: map[string]config.ProviderConfig{
+			"google": {Type: "google"},
+		},
+		Smart: config.SmartConfig{
+			Classifier: config.ClassifierConfig{Mode: "heuristic"},
+			Sticky:     "turn",
+			Tiers: map[string][]string{
+				"simple": {"google/gemini-2.5-flash"},
+			},
+		},
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := server.NewServer(cfg, engine)
+	defer srv.Metrics().Close()
+	tui := New(srv, engine, nil)
+
+	providersInfo := tui.getSortedProvidersInfo()
+	if len(providersInfo) != 1 || !strings.Contains(providersInfo[0], "GOOGLE") {
+		t.Fatalf("unexpected providers info: %+v", providersInfo)
+	}
+
+	sess := srv.Sessions().GetOrCreate("s-smart", "127.0.0.1", "test", "Test Client")
+	srv.Sessions().RecordRequest(sess.ID, session.RequestRecord{
+		Model: "gemini-2.5-flash", DurationMs: 150, Tier: "complex",
+		InputTokens: 50, OutputTokens: 20, TotalTokens: 70, Status: "success",
+	})
+
+	sessionsInfo := tui.getSessionsInfo(0)
+	if len(sessionsInfo) != 1 || !strings.Contains(sessionsInfo[0], "smart[comp]") {
+		t.Fatalf("expected smart[comp] in session line, got: %q", sessionsInfo)
+	}
+}
