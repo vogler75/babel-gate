@@ -64,6 +64,77 @@ providers:
     # 3. GITHUB_TOKEN or COPILOT_API_KEY env var
     # api_key: "${GITHUB_TOKEN}"
 
+  # Siemens SDC LLM Gateway (Anthropic Messages API; key sent as x-api-key and Bearer)
+  # sdc:
+  #   type: anthropic
+  #   enabled: true
+  #   base_url: "https://llm.sdc.siemens.cloud"
+  #   api_key: "${SDC_API_KEY}"
+
+  # Siemens on-prem models (OpenAI-compatible)
+  # onprem:
+  #   type: openai
+  #   enabled: true
+  #   base_url: "https://api.siemens.com/llm/v1"
+  #   api_key: "${SIAK_KEY}"
+
+# Optional: smart routing. Exposes a virtual model (default "smart-router") that
+# classifies each request into SIMPLE / MEDIUM / COMPLEX / REASONING and sends it
+# to the first healthy target of that tier. Tiers with no targets climb to the
+# next higher tier. Targets are "provider/model".
+# smart:
+#   enabled: true
+#   model: smart-router
+#   default_tier: COMPLEX            # used when no classifier is confident
+#   # min_tier: MEDIUM               # never route below this tier
+#   session_affinity_ttl_seconds: 3600  # a session never downgrades within the TTL
+#   allowed_fails: 2                 # consecutive errors before cooldown
+#   cooldown_seconds: 300
+#   usage_log: logs/usage.jsonl      # one JSON line per smart request (tokens, cost, latency)
+#   # Tiers, classifier and budgets hot-reload via the TUI 'r' key or POST /api/smart.
+#   classifier:
+#     type: auto                     # heuristic | laya | http | auto (laya if url set)
+#     url: "${LAYA_URL}"             # laya-serve base URL, e.g. http://localhost:8000
+#     # api_key: "${LAYA_API_KEY}"
+#     timeout_ms: 800
+#     min_prob: 0.40
+#   # keywords:                      # checked first; defaults include "ultrathink" -> REASONING
+#   #   - keywords: ["ultrathink", "think harder"]
+#   #     tier: REASONING
+#   tiers:
+#     SIMPLE:    ["onprem/gpt-oss-120b", "copilot/claude-haiku-4.5"]
+#     MEDIUM:    ["copilot/gpt-5-mini", "onprem/qwen-3.6-27b"]
+#     COMPLEX:   ["copilot/claude-sonnet-5", "sdc/claude-sonnet-5"]
+#     # Sonnet 5.5 is not yet served (Copilot: model_not_supported, SDC: 404 as of 2026-09-29).
+#     # Once live, prepend it: ["copilot/claude-sonnet-5.5", "sdc/claude-sonnet-5-5", ...]
+#     REASONING: ["copilot/claude-opus-5.5", "sdc/claude-opus-5"]
+#   # Optional context windows (tokens). A target is skipped while the estimated
+#   # prompt + max_tokens exceeds its window; it stays a last resort if nothing fits.
+#   # This lets clients use a large window (e.g. Claude Code) without small models failing.
+#   context_windows:
+#     onprem/gpt-oss-120b: 131072
+#     copilot/claude-haiku-4.5: 200000
+#   # Optional local spend caps (estimates from token usage; stored in database.path).
+#   # A target whose provider has used up its share for the tier is skipped.
+#   budgets:
+#     copilot:
+#       limit: 30                      # per period_days
+#       currency: USD
+#       period_days: 30
+#       tier_weights: { REASONING: 0.6, COMPLEX: 0.3, MEDIUM: 0.07, SIMPLE: 0.03 }
+#       default_price: [3, 15, 0.3, 3.75]   # per 1M tokens: input, output, cache read, cache write
+#       prices:
+#         claude-opus-5.5: [4, 20, 0.2, 5]
+#         claude-sonnet-5: [3, 15, 0.3, 3.75]
+#         # claude-sonnet-5.5: [3, 15, 0.3, 3.75]   # placeholder, set real price once available
+#         claude-haiku-4.5: [1, 5, 0.1, 1.25]
+#     sdc:
+#       limit: 0                       # 0 = track spend only, never block
+#       currency: EUR
+#       prices:
+#         claude-opus-5: [4.35, 21.75, 0.435, 5.438]
+#         # claude-sonnet-5-5: [2.61, 13.05, 0.261, 3.263]   # placeholder, set real price once available
+
 # Optional: model aliases if you want custom shortcuts
 # routing:
 #   routes:

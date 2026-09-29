@@ -55,11 +55,60 @@ type LoggingConfig struct {
 	MaxBackups int    `yaml:"max_backups"` // Max number of rotated log files to retain, defaults to 5
 }
 
+// SmartConfig enables the complexity-based virtual model (see pkg/smart).
+type SmartConfig struct {
+	Enabled                   bool                    `yaml:"enabled" json:"enabled"`
+	Model                     string                  `yaml:"model" json:"model"`
+	Classifier                ClassifierConfig        `yaml:"classifier" json:"classifier"`
+	Keywords                  []KeywordRuleConfig     `yaml:"keywords" json:"keywords"`
+	MinTier                   string                  `yaml:"min_tier" json:"min_tier"`
+	DefaultTier               string                  `yaml:"default_tier" json:"default_tier"`
+	SessionAffinityTTLSeconds int                     `yaml:"session_affinity_ttl_seconds" json:"session_affinity_ttl_seconds"`
+	AllowedFails              int                     `yaml:"allowed_fails" json:"allowed_fails"`
+	CooldownSeconds           int                     `yaml:"cooldown_seconds" json:"cooldown_seconds"`
+	Tiers                     map[string][]string     `yaml:"tiers" json:"tiers"`
+	ContextWindows            map[string]int          `yaml:"context_windows" json:"context_windows"`
+	Budgets                   map[string]BudgetConfig `yaml:"budgets" json:"budgets"`
+	UsageLog                  string                  `yaml:"usage_log" json:"usage_log"`
+}
+
+// BudgetConfig caps estimated spend for one provider over a rolling window.
+// Prices are per 1M tokens: [input, output, cache_read, cache_write].
+// TierWeights split Limit between tiers; tiers without a weight share nothing
+// when weights are set, and everything when no weights are set.
+type BudgetConfig struct {
+	Limit        float64              `yaml:"limit" json:"limit"`
+	Currency     string               `yaml:"currency" json:"currency"`
+	PeriodDays   int                  `yaml:"period_days" json:"period_days"`
+	TierWeights  map[string]float64   `yaml:"tier_weights" json:"tier_weights"`
+	Prices       map[string][]float64 `yaml:"prices" json:"prices"`
+	DefaultPrice []float64            `yaml:"default_price" json:"default_price"`
+}
+
+// ClassifierConfig selects how requests are assigned a tier.
+// Type: heuristic (default), laya, http, or auto (laya when url is set).
+type ClassifierConfig struct {
+	Type      string  `yaml:"type" json:"type"`
+	URL       string  `yaml:"url" json:"url"`
+	APIKey    string  `yaml:"api_key" json:"-"`
+	Model     string  `yaml:"model" json:"model"`
+	TimeoutMs int     `yaml:"timeout_ms" json:"timeout_ms"`
+	MinProb   float64 `yaml:"min_prob" json:"min_prob"`
+	MaxChars  int     `yaml:"max_chars" json:"max_chars"`
+	CacheSize int     `yaml:"cache_size" json:"cache_size"`
+}
+
+type KeywordRuleConfig struct {
+	Keywords []string `yaml:"keywords" json:"keywords"`
+	Tier     string   `yaml:"tier" json:"tier"`
+}
+
 // Config is the top-level configuration structure.
 type Config struct {
 	Server     ServerConfig              `yaml:"server"`
 	Providers  map[string]ProviderConfig `yaml:"providers"`
 	Routing    RoutingConfig             `yaml:"routing"`
+	Smart      SmartConfig               `yaml:"smart"`
 	Database   DatabaseConfig            `yaml:"database"`
 	Logging    LoggingConfig             `yaml:"logging"`
 	SourcePath string                    `yaml:"-"`
@@ -197,7 +246,61 @@ func Load(path string) (*Config, error) {
 		cfg.Logging.MaxBackups = 5
 	}
 
+	applySmartDefaults(&cfg.Smart)
+
 	return cfg, nil
+}
+
+func applySmartDefaults(s *SmartConfig) {
+	if s.Model == "" {
+		s.Model = "smart-router"
+	}
+	if s.DefaultTier == "" {
+		s.DefaultTier = "COMPLEX"
+	}
+	if s.SessionAffinityTTLSeconds == 0 {
+		s.SessionAffinityTTLSeconds = 3600
+	}
+	if s.AllowedFails <= 0 {
+		s.AllowedFails = 2
+	}
+	if s.CooldownSeconds <= 0 {
+		s.CooldownSeconds = 300
+	}
+	if s.UsageLog == "" {
+		s.UsageLog = "logs/usage.jsonl"
+	}
+	for name, b := range s.Budgets {
+		if b.PeriodDays <= 0 {
+			b.PeriodDays = 30
+		}
+		if b.Currency == "" {
+			b.Currency = "USD"
+		}
+		s.Budgets[name] = b
+	}
+	c := &s.Classifier
+	if url := os.Getenv("LAYA_URL"); url != "" && c.URL == "" {
+		c.URL = url
+	}
+	if key := os.Getenv("LAYA_API_KEY"); key != "" && c.APIKey == "" {
+		c.APIKey = key
+	}
+	if c.Type == "" {
+		c.Type = "auto"
+	}
+	if c.TimeoutMs <= 0 {
+		c.TimeoutMs = 800
+	}
+	if c.MinProb <= 0 {
+		c.MinProb = 0.40
+	}
+	if c.MaxChars <= 0 {
+		c.MaxChars = 1500
+	}
+	if c.CacheSize <= 0 {
+		c.CacheSize = 512
+	}
 }
 
 func autoPopulateFromEnv(cfg *Config) {

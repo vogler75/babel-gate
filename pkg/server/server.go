@@ -57,6 +57,7 @@ func NewServer(cfg *config.Config, engine *router.Engine) *Server {
 	mux.HandleFunc("/api/providers/", dashboardHandler.HandleAPIProvider)
 	mux.HandleFunc("/api/routing", dashboardHandler.HandleAPIRouting)
 	mux.HandleFunc("/api/models", dashboardHandler.HandleAPIModels)
+	mux.HandleFunc("/api/smart", dashboardHandler.HandleAPISmart)
 	mux.HandleFunc("/api/sessions", dashboardHandler.HandleAPISessions)
 	mux.HandleFunc("/api/sessions/clear", dashboardHandler.HandleAPIClearSessions)
 	mux.HandleFunc("/api/metrics/summary", dashboardHandler.HandleAPIMetricsSummary)

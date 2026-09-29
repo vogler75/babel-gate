@@ -28,6 +28,7 @@
   - [3. Claude Code with Local / Enterprise LLMs (Ollama, vLLM, DeepSeek)](#3-claude-code-with-local--enterprise-llms-ollama-vllm-deepseek)
   - [4. OpenAI SDK (Python & Node) to Claude or Gemini](#4-openai-sdk-python--node-to-claude-or-gemini)
   - [5. Google GenAI SDK / cURL to OpenAI or Claude](#5-google-genai-sdk--curl-to-openai-or-claude)
+  - [6. Smart Routing (virtual `smart-router` model)](#6-smart-routing-virtual-smart-router-model)
 - [Running in the Background](#running-in-the-background)
 - [GitHub Copilot Authentication](#github-copilot-authentication)
 - [Web Dashboard & Playground](#web-dashboard--playground)
@@ -344,6 +345,12 @@ curl -X POST "http://localhost:8080/google/v1beta/models/openai/gpt-4o:generateC
     }]
   }'
 ```
+
+### 6. Smart Routing (virtual `smart-router` model)
+
+Enable `smart:` in `config.yaml` to expose a virtual model that classifies each request as SIMPLE / MEDIUM / COMPLEX / REASONING and routes it to the first healthy, in-budget target of that tier. Classification uses keywords, an optional self-hosted [Laya](docs/smart-routing.md#1-run-laya-optional) classifier, or a built-in heuristic. Optional `context_windows` skip targets too small for the prompt, and `budgets` cap estimated spend per provider. The dashboard, TUI and `GET /api/smart` show routing decisions live.
+
+See **[docs/smart-routing.md](docs/smart-routing.md)** for setup, Laya, and Claude Code usage.
 
 ---
 

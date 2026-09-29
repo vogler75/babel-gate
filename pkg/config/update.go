@@ -66,6 +66,26 @@ func LoadRouting(path string) (RoutingConfig, error) {
 	return document.Routing, nil
 }
 
+// LoadSmart reads only the smart section from a YAML configuration file and
+// applies the same defaults used during startup.
+func LoadSmart(path string) (SmartConfig, error) {
+	if path == "" {
+		return SmartConfig{}, fmt.Errorf("no configuration file is active")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SmartConfig{}, fmt.Errorf("reading config file: %w", err)
+	}
+	var document struct {
+		Smart SmartConfig `yaml:"smart"`
+	}
+	if err := yaml.Unmarshal([]byte(expandEnv(string(data))), &document); err != nil {
+		return SmartConfig{}, fmt.Errorf("parsing config file: %w", err)
+	}
+	applySmartDefaults(&document.Smart)
+	return document.Smart, nil
+}
+
 func updateYAML(path string, mutate func(*yaml.Node) error) error {
 	if path == "" {
 		return fmt.Errorf("no configuration file is active")

@@ -116,6 +116,47 @@ func (d *DashboardHandler) HandleAPIRouting(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(map[string]any{"routing": d.engine.GetRouting(), "persisted": persisted})
 }
 
+// HandleAPISmart returns the smart router state (GET) or reloads the smart
+// section from the active YAML configuration (POST).
+func (d *DashboardHandler) HandleAPISmart(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	sr := d.engine.Smart()
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPost:
+		if err := d.engine.ReloadSmart(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	default:
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if sr == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": false})
+		return
+	}
+	decisions := sr.Decisions()
+	for i, j := 0, len(decisions)-1; i < j; i, j = i+1, j-1 {
+		decisions[i], decisions[j] = decisions[j], decisions[i]
+	}
+	cfg := sr.Config()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"enabled":         true,
+		"model":           sr.Model(),
+		"tiers":           cfg.Tiers,
+		"min_tier":        cfg.MinTier,
+		"default":         cfg.DefaultTier,
+		"decisions":       decisions,
+		"budgets":         sr.Budget().Status(),
+		"cooldowns":       sr.Cooldowns(),
+		"usage_log":       sr.UsageLog(),
+		"context_windows": cfg.ContextWindows,
+		"reloaded":        r.Method == http.MethodPost,
+	})
+}
+
 func (d *DashboardHandler) HandleAPIModels(w http.ResponseWriter, r *http.Request) {
 	models, err := d.catalog.ListAll(r.Context())
 	if err != nil {
@@ -706,6 +747,29 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Smart Router -->
+    <div class="card" id="smartCard" style="margin-bottom: 1.75rem; display:none;">
+      <h2 style="margin-bottom: 0.25rem;">Smart Router <span class="badge" id="smartModel"></span></h2>
+      <div class="muted" style="margin-bottom: .75rem;">Complexity tiers, budget spend and recent routing decisions.</div>
+      <div id="smartTiers" style="margin-bottom: 1rem;"></div>
+      <div style="overflow-x: auto; margin-bottom: 1rem;">
+        <table>
+          <thead><tr><th>Provider</th><th>Tier</th><th>Spent</th><th>Limit</th><th>Window</th><th>Status</th></tr></thead>
+          <tbody id="smartBudgets"><tr><td colspan="6">No budgets configured</td></tr></tbody>
+        </table>
+      </div>
+      <div style="overflow-x: auto; max-height: 320px; overflow-y: auto;">
+        <table>
+          <thead><tr><th>Time</th><th>Tier</th><th>Source</th><th>Target</th><th>Skipped</th><th>Ask</th></tr></thead>
+          <tbody id="smartDecisions"><tr><td colspan="6">No decisions yet</td></tr></tbody>
+        </table>
+      </div>
+      <div style="display:flex; align-items:center; gap:.75rem; margin-top:1rem;">
+        <button class="btn-sm" onclick="reloadSmart()">↻ Reload smart config from YAML</button>
+        <span id="smartStatus" class="muted"></span>
+      </div>
+    </div>
+
     <!-- Provider Configuration -->
     <div class="card" style="margin-bottom: 1.75rem;">
       <h2 style="margin-bottom: 0.25rem;">Upstream Providers <span class="badge" id="provCount">0</span></h2>
@@ -1114,6 +1178,52 @@ const dashboardHTML = `<!DOCTYPE html>
         renderRouting();
         status.textContent = 'Reloaded from YAML and active now.';
         await loadData();
+      } catch (err) {
+        status.textContent = 'Reload failed: ' + err.message.trim();
+      }
+    }
+
+    function renderSmart(data) {
+      const card = document.getElementById('smartCard');
+      if (!data || !data.enabled) { card.style.display = 'none'; return; }
+      card.style.display = '';
+      document.getElementById('smartModel').textContent = data.model;
+      const cooldowns = data.cooldowns || {};
+      const order = ['SIMPLE', 'MEDIUM', 'COMPLEX', 'REASONING'];
+      document.getElementById('smartTiers').innerHTML = order.filter(t => (data.tiers || {})[t]).map(t =>
+        '<div><strong>' + t + '</strong>: ' + data.tiers[t].map(x =>
+          cooldowns[x] ? '<span style="color:#f85149" title="cooling down">' + escapeHtml(x) + '</span>' : '<code>' + escapeHtml(x) + '</code>'
+        ).join(' → ') + '</div>').join('');
+      const budgets = data.budgets || [];
+      document.getElementById('smartBudgets').innerHTML = budgets.length ? budgets.map(b => {
+        const pct = b.limit > 0 ? Math.min(100, b.spent / b.limit * 100) : 0;
+        const status = b.limit <= 0 ? '<span class="muted">tracking</span>' : b.exhausted ? '<span style="color:#f85149">exhausted</span>' : pct.toFixed(0) + '%';
+        return '<tr><td>' + escapeHtml(b.provider) + '</td><td>' + escapeHtml(b.tier || 'all') + '</td><td>' + b.spent.toFixed(4) + ' ' + escapeHtml(b.currency) +
+          '</td><td>' + (b.limit > 0 ? b.limit.toFixed(2) : '∞') + '</td><td>' + b.period_days + 'd</td><td>' + status + '</td></tr>';
+      }).join('') : '<tr><td colspan="6">No budgets configured</td></tr>';
+      const decisions = data.decisions || [];
+      document.getElementById('smartDecisions').innerHTML = decisions.length ? decisions.slice(0, 50).map(d =>
+        '<tr><td>' + new Date(d.time).toLocaleTimeString() + '</td><td>' + escapeHtml(d.tier) + (d.pinned ? ' 📌' : '') +
+        '</td><td>' + escapeHtml((d.result && d.result.source) || '') + '</td><td>' + (d.error ? '<span style="color:#f85149">' + escapeHtml(d.error) + '</span>' : escapeHtml(d.target)) +
+        '</td><td class="muted">' + escapeHtml((d.skipped || []).join(', ')) + '</td><td class="muted">' + escapeHtml(d.ask || '') + '</td></tr>'
+      ).join('') : '<tr><td colspan="6">No decisions yet</td></tr>';
+    }
+
+    async function loadSmart() {
+      try {
+        const res = await fetch('/api/smart');
+        if (res.ok) renderSmart(await res.json());
+      } catch (err) {}
+    }
+
+    async function reloadSmart() {
+      const status = document.getElementById('smartStatus');
+      status.textContent = 'Reloading…';
+      try {
+        const res = await fetch('/api/smart', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        renderSmart(await res.json());
+        status.textContent = 'Reloaded from YAML and active now.';
       } catch (err) {
         status.textContent = 'Reload failed: ' + err.message.trim();
       }
@@ -2578,9 +2688,11 @@ const dashboardHTML = `<!DOCTYPE html>
     loadSessions();
     loadAnalytics();
     loadSpeedMetrics();
+    loadSmart();
 
     // Auto-refresh sessions every 4 seconds
     setInterval(loadSessions, 4000);
+    setInterval(loadSmart, 4000);
   </script>
 </body>
 </html>

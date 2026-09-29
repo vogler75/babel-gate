@@ -72,6 +72,18 @@ func (c *Catalog) ListAll(ctx context.Context) ([]CatalogModel, error) {
 		}
 	}
 
+	if sr := c.engine.Smart(); sr != nil {
+		seen["router-alias:"+sr.Model()] = true
+		results = append(results, CatalogModel{
+			ID:          sr.Model(),
+			DisplayName: "Smart Router (auto)",
+			Provider:    "router-alias",
+			Type:        "alias",
+			Target:      "smart",
+			Description: "Routes each request to a model tier by complexity",
+		})
+	}
+
 	// 3. Add configured aliases
 	routes := c.engine.GetRoutes()
 	aliasNames := make([]string, 0, len(routes))

@@ -25,6 +25,7 @@ func ToOpenAIRequest(req *canonical.CanonicalRequest) (*ChatCompletionRequest, e
 
 	modelLower := strings.ToLower(req.Model)
 	isNewerModel := strings.HasPrefix(modelLower, "gpt-5") ||
+		strings.HasPrefix(modelLower, "gpt-6") ||
 		strings.HasPrefix(modelLower, "o1") ||
 		strings.HasPrefix(modelLower, "o3") ||
 		strings.HasPrefix(modelLower, "o4") ||

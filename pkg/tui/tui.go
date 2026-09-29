@@ -309,6 +309,13 @@ func (t *TUI) handleKey(key string) bool {
 			} else {
 				log.Printf("[TUI] routes reloaded from configuration")
 			}
+			if t.engine.Smart() != nil {
+				if err := t.engine.ReloadSmart(); err != nil {
+					log.Printf("[TUI] failed to reload smart config: %v", err)
+				} else {
+					log.Printf("[TUI] smart config reloaded from configuration")
+				}
+			}
 		}
 		t.updateSize()
 
@@ -419,6 +426,12 @@ func (t *TUI) render() {
 	)
 	sb.WriteString(t.renderBoxLine(statusLine, width))
 	sb.WriteString("\r\n")
+	smartRows := 0
+	if line := t.smartInfo(); line != "" {
+		sb.WriteString(t.renderBoxLine(line, width))
+		sb.WriteString("\r\n")
+		smartRows = 1
+	}
 
 	// 2. Focusable Providers and Sessions panes
 	providerLines := t.getSortedProvidersInfo()
@@ -434,7 +447,7 @@ func (t *TUI) render() {
 
 	// Reserve one row for each pane and distribute remaining space, keeping a
 	// useful log area even on smaller terminals.
-	availableContent := t.rows - 7
+	availableContent := t.rows - 7 - smartRows
 	providerHeight, sessionHeight := 1, 1
 	remaining := availableContent - 5 // reserve at least three rows for logs when possible
 	maxProviderHeight := minInt(maxInt(1, providerCount), 5)
@@ -491,7 +504,7 @@ func (t *TUI) render() {
 
 	// Calculate log box height dynamically:
 	// Frame overhead: border/status + three dividers + provider/session rows + bottom/footer.
-	fixedRows := 7 + len(providerLines) + len(sessionLines)
+	fixedRows := 7 + smartRows + len(providerLines) + len(sessionLines)
 	logHeight := t.rows - fixedRows
 	if logHeight < 1 {
 		logHeight = 1
@@ -559,6 +572,65 @@ func (t *TUI) computeVisibleLogs(lines []string, visibleRows int) []string {
 	}
 
 	return lines[startIdx:endIdx]
+}
+
+// smartInfo summarizes the smart router: tier counts of recent decisions,
+// the last target, and the tightest budget.
+func (t *TUI) smartInfo() string {
+	if t.engine == nil || t.engine.Smart() == nil {
+		return ""
+	}
+	sr := t.engine.Smart()
+	decisions := sr.Decisions()
+	counts := map[string]int{}
+	for _, d := range decisions {
+		counts[string(d.Tier)]++
+	}
+	var parts []string
+	for _, tier := range []string{"SIMPLE", "MEDIUM", "COMPLEX", "REASONING"} {
+		if counts[tier] > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", tier[:1], counts[tier]))
+		}
+	}
+	line := fmt.Sprintf(" Smart: %s%s%s", colorBold+colorCyan, sr.Model(), colorReset)
+	if len(parts) > 0 {
+		line += " │ Tiers: " + strings.Join(parts, " ")
+	}
+	if n := len(decisions); n > 0 {
+		last := decisions[n-1]
+		target := last.Target
+		if last.ErrorMsg != "" {
+			target = colorRed + "error" + colorReset
+		}
+		line += fmt.Sprintf(" │ Last: %s → %s", last.Tier, target)
+	}
+	worst := -1.0
+	var worstLabel string
+	for _, b := range sr.Budget().Status() {
+		if b.Limit <= 0 {
+			continue
+		}
+		if pct := b.Spent / b.Limit * 100; pct > worst {
+			worst = pct
+			worstLabel = b.Provider
+			if b.Tier != "" {
+				worstLabel += "/" + b.Tier
+			}
+		}
+	}
+	if worst >= 0 {
+		color := colorGreen
+		if worst >= 100 {
+			color = colorRed
+		} else if worst >= 80 {
+			color = colorYellow
+		}
+		line += fmt.Sprintf(" │ Budget: %s %s%.0f%%%s", worstLabel, color, worst, colorReset)
+	}
+	if n := len(sr.Cooldowns()); n > 0 {
+		line += fmt.Sprintf(" │ %sCooling: %d%s", colorYellow, n, colorReset)
+	}
+	return line
 }
 
 func (t *TUI) getSortedProvidersInfo() []string {

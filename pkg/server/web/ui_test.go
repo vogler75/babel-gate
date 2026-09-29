@@ -419,6 +419,48 @@ func TestDashboardHandler_ReloadRoutingAPI(t *testing.T) {
 	}
 }
 
+func TestDashboardHandler_SmartAPI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(target string) {
+		content := "providers:\n  openai:\n    type: openai\nsmart:\n  enabled: true\n  usage_log: " + filepath.ToSlash(filepath.Join(filepath.Dir(path), "usage.jsonl")) +
+			"\n  tiers:\n    SIMPLE: [" + target + "]\n  budgets:\n    openai:\n      limit: 5\n"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("openai/gpt-4o-mini")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := router.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewDashboardHandler(engine, router.NewCatalog(engine), nil, nil)
+
+	w := httptest.NewRecorder()
+	handler.HandleAPISmart(w, httptest.NewRequest(http.MethodGet, "/api/smart", nil))
+	var got struct {
+		Enabled bool                `json:"enabled"`
+		Model   string              `json:"model"`
+		Tiers   map[string][]string `json:"tiers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Enabled || got.Model != "smart-router" || got.Tiers["SIMPLE"][0] != "openai/gpt-4o-mini" {
+		t.Fatalf("GET /api/smart = %s %v", w.Body.String(), err)
+	}
+
+	write("openai/gpt-4.1-nano")
+	w = httptest.NewRecorder()
+	handler.HandleAPISmart(w, httptest.NewRequest(http.MethodPost, "/api/smart", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("reload status %d: %s", w.Code, w.Body.String())
+	}
+	if tiers := engine.Smart().Config().Tiers["SIMPLE"]; len(tiers) != 1 || tiers[0] != "openai/gpt-4.1-nano" {
+		t.Fatalf("smart tiers not reloaded: %v", tiers)
+	}
+}
+
 func TestDashboardHandler_ProviderTogglePersists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

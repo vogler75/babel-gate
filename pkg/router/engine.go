@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
+	"github.com/vogler75/babel-gate/pkg/classifier"
 	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/providers/anthropic"
@@ -17,6 +18,7 @@ import (
 	"github.com/vogler75/babel-gate/pkg/providers/google"
 	"github.com/vogler75/babel-gate/pkg/providers/openai"
 	"github.com/vogler75/babel-gate/pkg/server/trace"
+	"github.com/vogler75/babel-gate/pkg/smart"
 )
 
 type ResolvedRoute struct {
@@ -31,6 +33,7 @@ type Engine struct {
 	cfg            *config.Config
 	providers      map[string]providers.Provider
 	providerModels map[string]map[string]bool // providerName -> lowerModelID -> true
+	smart          *smart.Router
 }
 
 func NewEngine(cfg *config.Config) (*Engine, error) {
@@ -38,6 +41,10 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		cfg:            cfg,
 		providers:      make(map[string]providers.Provider),
 		providerModels: make(map[string]map[string]bool),
+	}
+	if cfg.Smart.Enabled {
+		e.smart = smart.New(cfg.Smart, e.resolveSmartTarget)
+		e.smart.SetUsageLog(cfg.Smart.UsageLog)
 	}
 
 	for name, pcfg := range cfg.Providers {
@@ -215,6 +222,10 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 		}
 	}
 
+	if e.smart != nil && target == e.smart.Model() {
+		return &ResolvedRoute{Provider: e.smart, TargetModel: target}, nil
+	}
+
 	// 2. Check prefix (e.g. "google/gemini-2.5-pro", "openai/gpt-4o", "anthropic/claude-3-7-sonnet")
 	if slashIdx := strings.Index(target, "/"); slashIdx != -1 {
 		providerName := target[:slashIdx]
@@ -278,6 +289,22 @@ func (e *Engine) ResolveModel(requestedModel string) (*ResolvedRoute, error) {
 	}
 
 	return nil, fmt.Errorf("unable to resolve model %q to any active provider", requestedModel)
+}
+
+func (e *Engine) resolveSmartTarget(target string) (providers.Provider, string, error) {
+	route, err := e.ResolveModel(target)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, nested := route.Provider.(*smart.Router); nested {
+		return nil, "", fmt.Errorf("smart tier target %q cannot point at the smart router", target)
+	}
+	return route.Provider, route.TargetModel, nil
+}
+
+// Smart returns the smart router, or nil when smart routing is disabled.
+func (e *Engine) Smart() *smart.Router {
+	return e.smart
 }
 
 // ResolveTrackingModel returns the resolved provider name and the provider-prefixed model name.
@@ -541,6 +568,40 @@ func (e *Engine) ReloadRouting() error {
 		return err
 	}
 	e.cfg.Routing = cloneRouting(routing)
+	return nil
+}
+
+// ReloadSmart re-reads the smart section of the active configuration file and
+// applies tiers, classifier, failover and budget settings to the running
+// smart router. Enabling/disabling smart routing or renaming its model still
+// requires a restart.
+func (e *Engine) ReloadSmart() error {
+	if e.smart == nil {
+		return fmt.Errorf("smart routing is not enabled")
+	}
+	e.mu.RLock()
+	path := e.cfg.SourcePath
+	e.mu.RUnlock()
+	cfg, err := config.LoadSmart(path)
+	if err != nil {
+		return err
+	}
+	if !cfg.Enabled {
+		return fmt.Errorf("disabling smart routing requires a restart")
+	}
+	if cfg.Model != e.smart.Model() {
+		return fmt.Errorf("renaming the smart model requires a restart")
+	}
+	for name := range cfg.Tiers {
+		if _, ok := classifier.ParseTier(name); !ok {
+			return fmt.Errorf("unknown smart tier %q", name)
+		}
+	}
+	e.smart.Update(cfg)
+	e.smart.SetUsageLog(cfg.UsageLog)
+	e.mu.Lock()
+	e.cfg.Smart = cfg
+	e.mu.Unlock()
 	return nil
 }
 

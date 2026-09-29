@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vogler75/babel-gate/pkg/budget"
 	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/daemon"
 	"github.com/vogler75/babel-gate/pkg/logger"
@@ -177,6 +178,15 @@ func main() {
 	engine, err := router.NewEngine(cfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize routing engine: %v", err)
+	}
+	if sr := engine.Smart(); sr != nil {
+		tracker, err := budget.Open(cfg.Database.Path, cfg.Smart.Budgets)
+		if err != nil {
+			log.Printf("[SMART] budget tracking disabled: %v", err)
+		} else {
+			sr.SetBudget(tracker)
+			defer tracker.Close()
+		}
 	}
 
 	// If not running TUI, print startup summary to console
