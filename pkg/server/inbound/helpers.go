@@ -255,6 +255,26 @@ func applySmart(engine *router.Engine, w http.ResponseWriter, r *http.Request, r
 	if tr := trace.FromContext(ctx); tr != nil {
 		prov, endpoint, targetModel := engine.ResolveRouteInfo(req.Model)
 		tr.SetRoute(requested, prov, endpoint, targetModel)
+		if decision != nil {
+			tr.SetSmart(decision.Tier.String(), decision.Reason, decision.Sticky, decision.DecisionDuration)
+		}
 	}
 	return r.WithContext(ctx), nil
+}
+
+// recordSessionRequest records an LLM request into the session manager, attaching smart routing metadata from the trace if present.
+func recordSessionRequest(sessions *session.Manager, sessID string, rec session.RequestRecord, tr *trace.RequestTrace) {
+	if sessions == nil || sessID == "" {
+		return
+	}
+	if tr != nil {
+		tier, reason, _, dur := tr.SmartInfo()
+		if tier != "" {
+			rec.Tier = tier
+			rec.SmartReason = reason
+			rec.SmartDurationMs = dur.Milliseconds()
+			rec.RequestedModel = tr.RequestedModel
+		}
+	}
+	sessions.RecordRequest(sessID, rec)
 }

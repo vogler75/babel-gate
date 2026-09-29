@@ -37,8 +37,9 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		id, client, last_protocol, client_ip, user_agent, created_at, last_active,
 		last_model, request_count, context_tokens, context_tokens_estimated,
 		input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
-		generation_duration_ms, measured_output_tokens, models, model_stats
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		generation_duration_ms, measured_output_tokens, models, model_stats,
+		last_tier, last_smart_reason
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		client = excluded.client,
 		last_protocol = excluded.last_protocol,
@@ -59,7 +60,9 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		generation_duration_ms = excluded.generation_duration_ms,
 		measured_output_tokens = excluded.measured_output_tokens,
 		models = excluded.models,
-		model_stats = excluded.model_stats;
+		model_stats = excluded.model_stats,
+		last_tier = excluded.last_tier,
+		last_smart_reason = excluded.last_smart_reason;
 	`
 
 	s.mu.Lock()
@@ -72,6 +75,7 @@ func (s *Store) SaveSession(sess *session.Session) error {
 		sess.InputTokens, sess.OutputTokens, sess.CachedInputTokens, sess.ReasoningTokens, sess.TotalTokens,
 		sess.TokensPerSecond, sess.GenerationDurationMs, sess.MeasuredOutputTokens,
 		string(modelsJSON), string(modelStatsJSON),
+		sess.LastTier, sess.LastSmartReason,
 	)
 	return err
 }
@@ -103,8 +107,9 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 	INSERT INTO session_requests (
 		id, session_id, timestamp, protocol, provider, model, stream,
 		duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
-		output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message,
+		tier, smart_reason, smart_duration_ms, requested_model
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		session_id = excluded.session_id,
 		timestamp = excluded.timestamp,
@@ -122,7 +127,11 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 		total_tokens = excluded.total_tokens,
 		tokens_per_second = excluded.tokens_per_second,
 		status = excluded.status,
-		error_message = excluded.error_message;
+		error_message = excluded.error_message,
+		tier = excluded.tier,
+		smart_reason = excluded.smart_reason,
+		smart_duration_ms = excluded.smart_duration_ms,
+		requested_model = excluded.requested_model;
 	`
 
 	s.mu.Lock()
@@ -133,6 +142,7 @@ func (s *Store) SaveRequest(sessionID string, rec session.RequestRecord) error {
 		rec.DurationMs, rec.GenerationDurationMs, rec.InputTokens, inEstInt,
 		rec.OutputTokens, rec.CachedInputTokens, rec.ReasoningTokens, rec.TotalTokens, rec.TokensPerSecond,
 		rec.Status, rec.ErrorMessage,
+		rec.Tier, rec.SmartReason, rec.SmartDurationMs, rec.RequestedModel,
 	)
 	return err
 }
@@ -159,7 +169,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 		SELECT id, client, last_protocol, client_ip, user_agent, created_at, last_active,
 		       last_model, request_count, context_tokens, context_tokens_estimated,
 		       input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second,
-		       generation_duration_ms, measured_output_tokens, models, model_stats
+		       generation_duration_ms, measured_output_tokens, models, model_stats,
+		       last_tier, last_smart_reason
 		FROM sessions
 		WHERE last_active >= ?
 		ORDER BY last_active ASC
@@ -175,7 +186,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 		var (
 			id, client, lastProtocol, clientIP, userAgent  string
 			createdAtStr, lastActiveStr                    string
-			lastModel                                      string
+			lastModel, lastTier, lastSmartReason           string
 			reqCount, ctxTok, ctxTokEst                    int
 			inTok, outTok, cachedTok, reasoningTok, totTok int
 			tps                                            float64
@@ -190,6 +201,7 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			&reqCount, &ctxTok, &ctxTokEst,
 			&inTok, &outTok, &cachedTok, &reasoningTok, &totTok,
 			&tps, &genDurMs, &measOutTok, &modelsJSON, &modelStatsJSON,
+			&lastTier, &lastSmartReason,
 		); err != nil {
 			return nil, fmt.Errorf("scanning session row: %w", err)
 		}
@@ -228,6 +240,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 			CreatedAt:              createdAt,
 			LastActive:             lastActive,
 			LastModel:              lastModel,
+			LastTier:               lastTier,
+			LastSmartReason:        lastSmartReason,
 			RequestCount:           reqCount,
 			ContextTokens:          ctxTok,
 			ContextTokensEstimated: ctxTokEst != 0,
@@ -253,7 +267,8 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 	reqStmt, err := s.db.Prepare(`
 		SELECT id, timestamp, protocol, provider, model, stream,
 		       duration_ms, generation_duration_ms, input_tokens, input_tokens_estimated,
-		       output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message
+		       output_tokens, cached_input_tokens, reasoning_tokens, total_tokens, tokens_per_second, status, error_message,
+		       tier, smart_reason, smart_duration_ms, requested_model
 		FROM session_requests
 		WHERE session_id = ?
 		ORDER BY timestamp DESC
@@ -278,11 +293,14 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 				inTok, inTokEst, outTok, cachedTok, reasoningTok, totTok int
 				tps                                                      float64
 				status, errMsg                                           string
+				tier, smartReason, reqModel                              string
+				smartDurMs                                               int64
 			)
 			if err := reqRows.Scan(
 				&reqID, &tsStr, &protocol, &provider, &model, &streamInt,
 				&durMs, &genDurMs, &inTok, &inTokEst,
 				&outTok, &cachedTok, &reasoningTok, &totTok, &tps, &status, &errMsg,
+				&tier, &smartReason, &smartDurMs, &reqModel,
 			); err != nil {
 				continue
 			}
@@ -310,6 +328,10 @@ func (s *Store) LoadActiveSessions(since time.Time, maxSessions int, maxRequests
 				TokensPerSecond:      tps,
 				Status:               status,
 				ErrorMessage:         errMsg,
+				Tier:                 tier,
+				SmartReason:          smartReason,
+				SmartDurationMs:      smartDurMs,
+				RequestedModel:       reqModel,
 			})
 		}
 		reqRows.Close()

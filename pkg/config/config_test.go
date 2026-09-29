@@ -118,3 +118,47 @@ func TestIssue2GoogleTimeoutConfiguration(t *testing.T) {
 		t.Fatalf("timeout settings were not loaded independently: %+v", google)
 	}
 }
+
+func TestUpdateSmartAndLoadSmart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "providers:\n  openai:\n    type: openai\nsmart:\n  classifier:\n    mode: laya\n    api_key: ${LAYA_SECRET}\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := SmartConfig{
+		Classifier: ClassifierConfig{
+			Mode:   "laya",
+			URL:    "http://localhost:8000",
+			APIKey: "••••••••", // masked, should preserve ${LAYA_SECRET}
+		},
+		Sticky:          "turn",
+		CooldownSeconds: 45,
+		Tiers: map[string][]string{
+			"simple":  {"openai/gpt-4o-mini"},
+			"complex": {"openai/gpt-4o"},
+		},
+	}
+	if err := UpdateSmart(path, updated); err != nil {
+		t.Fatalf("UpdateSmart failed: %v", err)
+	}
+
+	loaded, err := LoadSmart(path)
+	if err != nil {
+		t.Fatalf("LoadSmart failed: %v", err)
+	}
+	if loaded.CooldownSeconds != 45 || loaded.Sticky != "turn" {
+		t.Fatalf("unexpected loaded smart: %+v", loaded)
+	}
+	if loaded.Classifier.URL != "http://localhost:8000" {
+		t.Fatalf("unexpected URL: %q", loaded.Classifier.URL)
+	}
+	if len(loaded.Tiers["simple"]) != 1 || loaded.Tiers["simple"][0] != "openai/gpt-4o-mini" {
+		t.Fatalf("unexpected tiers: %+v", loaded.Tiers)
+	}
+	// Verify raw content preserves env var
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "${LAYA_SECRET}") {
+		t.Fatalf("masked api key did not preserve environment variable: %s", string(raw))
+	}
+}

@@ -66,6 +66,56 @@ func LoadRouting(path string) (RoutingConfig, error) {
 	return document.Routing, nil
 }
 
+// UpdateSmart replaces the smart section in the source YAML.
+// If the incoming Classifier.APIKey is masked (e.g. "••••••••" or empty),
+// any existing api_key in the file is preserved.
+func UpdateSmart(path string, smart SmartConfig) error {
+	return updateYAML(path, func(root *yaml.Node) error {
+		if smart.Classifier.APIKey == "••••••••" || smart.Classifier.APIKey == "" {
+			if existingSmart := mappingChild(root, "smart"); existingSmart != nil {
+				if existingClassifier := mappingChild(existingSmart, "classifier"); existingClassifier != nil {
+					if existingKeyNode := mappingChild(existingClassifier, "api_key"); existingKeyNode != nil {
+						smart.Classifier.APIKey = existingKeyNode.Value
+					}
+				}
+			}
+		}
+
+		var doc yaml.Node
+		data, err := yaml.Marshal(smart)
+		if err != nil {
+			return err
+		}
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return err
+		}
+		setMappingChild(root, "smart", doc.Content[0])
+		return nil
+	})
+}
+
+// LoadSmart reads only the smart section from a YAML configuration file.
+// Environment references are expanded exactly as they are during startup.
+func LoadSmart(path string) (SmartConfig, error) {
+	if path == "" {
+		return SmartConfig{}, fmt.Errorf("no configuration file is active")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SmartConfig{}, fmt.Errorf("reading config file: %w", err)
+	}
+	var document struct {
+		Smart SmartConfig `yaml:"smart"`
+	}
+	if err := yaml.Unmarshal([]byte(expandEnv(string(data))), &document); err != nil {
+		return SmartConfig{}, fmt.Errorf("parsing config file: %w", err)
+	}
+	if document.Smart.Tiers == nil {
+		document.Smart.Tiers = make(map[string][]string)
+	}
+	return document.Smart, nil
+}
+
 func updateYAML(path string, mutate func(*yaml.Node) error) error {
 	if path == "" {
 		return fmt.Errorf("no configuration file is active")

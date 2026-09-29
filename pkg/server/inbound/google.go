@@ -96,7 +96,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 
 	if err != nil {
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               false,
@@ -105,7 +105,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
-			})
+			}, tr)
 		}
 		http.Error(w, fmt.Sprintf("router error: %v", err), http.StatusBadGateway)
 		return
@@ -131,7 +131,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 	}
 
 	if sess != nil && h.sessions != nil {
-		h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+		recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 			Provider:             prov,
 			Model:                trackingModel,
 			Stream:               false,
@@ -143,7 +143,7 @@ func (h *GoogleHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Req
 			ReasoningTokens:      resp.Usage.ReasoningTokens,
 			TotalTokens:          totalTokens,
 			Status:               "success",
-		})
+		}, tr)
 	}
 
 	googResp, err := google.ToGoogleResponse(resp)
@@ -209,7 +209,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider:             prov,
 				Model:                trackingModel,
 				Stream:               true,
@@ -219,7 +219,7 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 				InputTokensEstimated: true,
 				Status:               "error",
 				ErrorMessage:         err.Error(),
-			})
+			}, tr)
 		}
 		http.Error(w, fmt.Sprintf("stream error: %v", err), http.StatusBadGateway)
 		return
@@ -252,12 +252,12 @@ func (h *GoogleHandler) HandleStreamGenerateContent(w http.ResponseWriter, r *ht
 			tr.MarkStreamDone()
 		}
 		if sess != nil && h.sessions != nil {
-			h.sessions.RecordRequest(sess.ID, session.RequestRecord{
+			recordSessionRequest(h.sessions, sess.ID, session.RequestRecord{
 				Provider: prov, Model: trackingModel, Stream: true,
 				DurationMs: time.Since(startTime).Milliseconds(), GenerationDurationMs: generationDurationMs(tr, time.Since(startTime)),
 				InputTokens: usageTracker.InTokens, InputTokensEstimated: usageTracker.InputEstimated, OutputTokens: usageTracker.OutTokens, CachedInputTokens: usageTracker.CachedInputTokens, ReasoningTokens: usageTracker.ReasoningTokens, TotalTokens: usageTracker.TotalTokens,
 				Status: streamStatus, ErrorMessage: streamErr,
-			})
+			}, tr)
 		}
 	}()
 	send := func(data any) bool {

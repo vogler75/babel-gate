@@ -36,6 +36,7 @@ type Engine struct {
 	smart         *smart.Router
 	smartCooldown time.Duration
 	cooldowns     map[string]time.Time // providerName -> skip in smart chains until
+	smartStats    SmartStats
 }
 
 func NewEngine(cfg *config.Config) (*Engine, error) {
@@ -44,6 +45,9 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		providers:      make(map[string]providers.Provider),
 		providerModels: make(map[string]map[string]bool),
 		cooldowns:      make(map[string]time.Time),
+		smartStats: SmartStats{
+			TierCounts: make(map[string]int64),
+		},
 	}
 
 	smartRouter, err := smart.NewRouter(cfg.Smart)

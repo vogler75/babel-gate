@@ -202,7 +202,9 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		generation_duration_ms INTEGER NOT NULL DEFAULT 0,
 		measured_output_tokens INTEGER NOT NULL DEFAULT 0,
 		models TEXT NOT NULL DEFAULT '[]',
-		model_stats TEXT NOT NULL DEFAULT '{}'
+		model_stats TEXT NOT NULL DEFAULT '{}',
+		last_tier TEXT NOT NULL DEFAULT '',
+		last_smart_reason TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
 
@@ -225,6 +227,10 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		tokens_per_second REAL NOT NULL DEFAULT 0.0,
 		status TEXT NOT NULL DEFAULT 'success',
 		error_message TEXT NOT NULL DEFAULT '',
+		tier TEXT NOT NULL DEFAULT '',
+		smart_reason TEXT NOT NULL DEFAULT '',
+		smart_duration_ms INTEGER NOT NULL DEFAULT 0,
+		requested_model TEXT NOT NULL DEFAULT '',
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 	);
 	CREATE INDEX IF NOT EXISTS idx_session_requests_session ON session_requests(session_id, timestamp DESC);
@@ -246,6 +252,12 @@ func NewStore(dbPath string, retentionDays int) (*Store, error) {
 		"ALTER TABLE sessions ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;",
 		"ALTER TABLE sessions ADD COLUMN last_protocol TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE session_requests ADD COLUMN protocol TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE session_requests ADD COLUMN tier TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE session_requests ADD COLUMN smart_reason TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE session_requests ADD COLUMN smart_duration_ms INTEGER NOT NULL DEFAULT 0;",
+		"ALTER TABLE session_requests ADD COLUMN requested_model TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE sessions ADD COLUMN last_tier TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE sessions ADD COLUMN last_smart_reason TEXT NOT NULL DEFAULT '';",
 	} {
 		_, _ = db.Exec(alter)
 	}

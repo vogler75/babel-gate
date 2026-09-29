@@ -16,10 +16,12 @@ const stickyTTL = 30 * time.Minute
 
 // Decision is the outcome of smart routing for one request.
 type Decision struct {
-	Tier    Tier
-	Targets []string // ordered "provider/model" candidates
-	Reason  string
-	Sticky  bool // tier was reused from the session's current turn
+	Tier             Tier
+	Targets          []string // ordered "provider/model" candidates
+	Reason           string
+	Sticky           bool          // tier was reused from the session's current turn
+	DecisionDuration time.Duration // time taken to make the decision
+	FallbackUsed     bool          // true if primary classifier failed or was below minConfidence, falling back to heuristic
 }
 
 // Router classifies smart requests and keeps the tier stable for the rest of
@@ -115,12 +117,20 @@ func Validate(cfg config.SmartConfig) error {
 
 // Decide picks the tier and ordered targets for a smart request.
 func (r *Router) Decide(ctx context.Context, req *canonical.CanonicalRequest) Decision {
+	start := time.Now()
 	if r.sticky && req.SessionID != "" && !IsNewTurn(req) {
 		if tier, ok := r.stickyTier(req.SessionID); ok {
-			return Decision{Tier: tier, Targets: r.TargetsFor(tier), Reason: "continuing turn", Sticky: true}
+			return Decision{
+				Tier:             tier,
+				Targets:          r.TargetsFor(tier),
+				Reason:           "continuing turn",
+				Sticky:           true,
+				DecisionDuration: time.Since(start),
+			}
 		}
 	}
 
+	fallbackUsed := false
 	c, err := r.primary.Classify(ctx, req)
 	if err != nil || c.Confidence < r.minConfidence {
 		if err != nil {
@@ -128,13 +138,20 @@ func (r *Router) Decide(ctx context.Context, req *canonical.CanonicalRequest) De
 		}
 		if _, isHeuristic := r.primary.(Heuristic); !isHeuristic {
 			c, _ = r.fallback.Classify(ctx, req)
+			fallbackUsed = true
 		}
 	}
 
 	if r.sticky && req.SessionID != "" {
 		r.remember(req.SessionID, c.Tier)
 	}
-	return Decision{Tier: c.Tier, Targets: r.TargetsFor(c.Tier), Reason: c.Reason}
+	return Decision{
+		Tier:             c.Tier,
+		Targets:          r.TargetsFor(c.Tier),
+		Reason:           c.Reason,
+		DecisionDuration: time.Since(start),
+		FallbackUsed:     fallbackUsed,
+	}
 }
 
 // TargetsFor returns a tier's targets. An unconfigured tier borrows from the

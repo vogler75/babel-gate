@@ -164,3 +164,58 @@ func TestSmartRejectsUnknownProvider(t *testing.T) {
 		t.Fatal("expected unknown provider error")
 	}
 }
+
+func TestSmartStatsAndSetSmart(t *testing.T) {
+	sdc := &failingProvider{mockProvider: mockProvider{name: "sdc", pType: "openai"}}
+	e := newSmartEngine(t, sdc)
+
+	stats := e.GetSmartStats()
+	if stats.TotalRequests != 0 {
+		t.Fatalf("expected 0 requests, got %d", stats.TotalRequests)
+	}
+
+	req := complexRequest()
+	ctx, decision, err := e.ApplySmart(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.DecisionDuration < 0 {
+		t.Fatalf("expected non-negative duration, got %v", decision.DecisionDuration)
+	}
+
+	stats = e.GetSmartStats()
+	if stats.TotalRequests != 1 || stats.TierCounts["complex"] != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	// Update smart configuration live
+	newCfg := config.SmartConfig{
+		Classifier: config.ClassifierConfig{Mode: "heuristic"},
+		Tiers: map[string][]string{
+			"simple":  {"sdc/sol"},
+			"complex": {"sdc/sol"},
+		},
+	}
+	persisted, err := e.SetSmart(newCfg)
+	if err != nil {
+		t.Fatalf("SetSmart failed: %v", err)
+	}
+	if persisted {
+		t.Fatal("expected persisted=false when no SourcePath set")
+	}
+
+	masked, hasKey := e.GetSmartMasked()
+	if hasKey || masked.Classifier.Mode != "heuristic" {
+		t.Fatalf("unexpected masked config: %+v, hasKey=%v", masked, hasKey)
+	}
+
+	reqSimple := &canonical.CanonicalRequest{Model: "smart", Messages: []canonical.Message{{Role: canonical.RoleUser, Parts: []canonical.ContentPart{{Type: canonical.PartText, Text: "fix typo"}}}}}
+	_, _, err = e.ApplySmart(ctx, reqSimple)
+	if err != nil {
+		t.Fatalf("ApplySmart with new config failed: %v", err)
+	}
+	stats = e.GetSmartStats()
+	if stats.TotalRequests != 2 || stats.TierCounts["simple"] != 1 {
+		t.Fatalf("unexpected stats after second request: %+v", stats)
+	}
+}

@@ -11,12 +11,24 @@ import (
 	"time"
 
 	"github.com/vogler75/babel-gate/pkg/canonical"
+	"github.com/vogler75/babel-gate/pkg/config"
 	"github.com/vogler75/babel-gate/pkg/providers"
 	"github.com/vogler75/babel-gate/pkg/server/trace"
 	"github.com/vogler75/babel-gate/pkg/smart"
 )
 
 type smartChainKey struct{}
+
+// SmartStats provides aggregate metrics about smart routing decisions.
+type SmartStats struct {
+	TotalRequests     int64            `json:"total_requests"`
+	TierCounts        map[string]int64 `json:"tier_counts"`
+	PrimaryDecisions  int64            `json:"primary_decisions"`
+	FallbackDecisions int64            `json:"fallback_decisions"`
+	StickyReuses      int64            `json:"sticky_reuses"`
+	TotalDecisionMs   int64            `json:"total_decision_ms"`
+	AvgDecisionMs     float64          `json:"avg_decision_ms"`
+}
 
 // IsSmartModel reports whether a requested model should be routed by tier.
 func (e *Engine) IsSmartModel(model string) bool {
@@ -32,6 +44,7 @@ func (e *Engine) ApplySmart(ctx context.Context, req *canonical.CanonicalRequest
 		return ctx, nil, nil
 	}
 	decision := e.smart.Decide(ctx, req)
+	e.recordSmartDecision(&decision)
 	targets := e.usableTargets(decision.Targets)
 	if len(targets) == 0 {
 		return ctx, &decision, fmt.Errorf("smart tier %s has no usable target (configured: %s)", decision.Tier, strings.Join(decision.Targets, ", "))
@@ -43,6 +56,173 @@ func (e *Engine) ApplySmart(ctx context.Context, req *canonical.CanonicalRequest
 		tr.AddNote(fmt.Sprintf("smart %s: %s", decision.Tier, decision.Reason))
 	}
 	return context.WithValue(ctx, smartChainKey{}, targets[1:]), &decision, nil
+}
+
+func (e *Engine) recordSmartDecision(d *smart.Decision) {
+	if d == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.smartStats.TotalRequests++
+	if e.smartStats.TierCounts == nil {
+		e.smartStats.TierCounts = make(map[string]int64)
+	}
+	e.smartStats.TierCounts[d.Tier.String()]++
+	if d.Sticky {
+		e.smartStats.StickyReuses++
+	} else if d.FallbackUsed {
+		e.smartStats.FallbackDecisions++
+	} else {
+		e.smartStats.PrimaryDecisions++
+	}
+	ms := d.DecisionDuration.Milliseconds()
+	e.smartStats.TotalDecisionMs += ms
+	if e.smartStats.TotalRequests > 0 {
+		e.smartStats.AvgDecisionMs = float64(e.smartStats.TotalDecisionMs) / float64(e.smartStats.TotalRequests)
+	}
+}
+
+// GetSmartConfig returns a copy of the active smart configuration.
+func (e *Engine) GetSmartConfig() config.SmartConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneSmartConfig(e.cfg.Smart)
+}
+
+// GetSmartMasked returns a copy of the active smart configuration with any API key masked.
+func (e *Engine) GetSmartMasked() (config.SmartConfig, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	cfg := cloneSmartConfig(e.cfg.Smart)
+	hasKey := cfg.Classifier.APIKey != ""
+	if hasKey {
+		cfg.Classifier.APIKey = "••••••••"
+	}
+	return cfg, hasKey
+}
+
+// GetSmartStats returns a copy of the cumulative smart routing statistics.
+func (e *Engine) GetSmartStats() SmartStats {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	counts := make(map[string]int64, len(e.smartStats.TierCounts))
+	for k, v := range e.smartStats.TierCounts {
+		counts[k] = v
+	}
+	return SmartStats{
+		TotalRequests:     e.smartStats.TotalRequests,
+		TierCounts:        counts,
+		PrimaryDecisions:  e.smartStats.PrimaryDecisions,
+		FallbackDecisions: e.smartStats.FallbackDecisions,
+		StickyReuses:      e.smartStats.StickyReuses,
+		TotalDecisionMs:   e.smartStats.TotalDecisionMs,
+		AvgDecisionMs:     e.smartStats.AvgDecisionMs,
+	}
+}
+
+// GetSmartCooldowns returns a map of providers currently cooling down and their remaining seconds.
+func (e *Engine) GetSmartCooldowns() map[string]int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	now := time.Now()
+	res := make(map[string]int)
+	for prov, until := range e.cooldowns {
+		if now.Before(until) {
+			res[prov] = int(until.Sub(now).Seconds())
+		}
+	}
+	return res
+}
+
+// GetProviderCooldown returns the remaining cooldown duration for a provider (0 if not cooling).
+func (e *Engine) GetProviderCooldown(provider string) time.Duration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	until, ok := e.cooldowns[provider]
+	if !ok {
+		return 0
+	}
+	now := time.Now()
+	if now.Before(until) {
+		return until.Sub(now)
+	}
+	return 0
+}
+
+// SetSmart atomically persists and activates a new smart configuration.
+func (e *Engine) SetSmart(cfg config.SmartConfig) (bool, error) {
+	if cfg.Enabled() {
+		if err := smart.Validate(cfg); err != nil {
+			return false, err
+		}
+		e.mu.RLock()
+		for tier, targets := range cfg.Tiers {
+			for _, target := range targets {
+				if slash := strings.Index(target, "/"); slash > 0 {
+					prov := target[:slash]
+					if _, ok := e.cfg.Providers[prov]; !ok {
+						e.mu.RUnlock()
+						return false, fmt.Errorf("smart tier %q references unknown provider %q", tier, prov)
+					}
+				}
+			}
+		}
+		// If masked APIKey was passed, preserve existing
+		if cfg.Classifier.APIKey == "••••••••" {
+			cfg.Classifier.APIKey = e.cfg.Smart.Classifier.APIKey
+		}
+		e.mu.RUnlock()
+	}
+
+	newRouter, err := smart.NewRouter(cfg)
+	if err != nil {
+		return false, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	persisted := e.cfg.SourcePath != ""
+	if persisted {
+		if err := config.UpdateSmart(e.cfg.SourcePath, cfg); err != nil {
+			return false, err
+		}
+	}
+
+	e.smart = newRouter
+	e.cfg.Smart = cloneSmartConfig(cfg)
+	if cfg.CooldownSeconds > 0 {
+		e.smartCooldown = time.Duration(cfg.CooldownSeconds) * time.Second
+	} else {
+		e.smartCooldown = 60 * time.Second
+	}
+	return persisted, nil
+}
+
+// ReloadSmart reloads the smart configuration from the active configuration file.
+func (e *Engine) ReloadSmart() error {
+	e.mu.RLock()
+	path := e.cfg.SourcePath
+	e.mu.RUnlock()
+
+	cfg, err := config.LoadSmart(path)
+	if err != nil {
+		return err
+	}
+	_, err = e.SetSmart(cfg)
+	return err
+}
+
+func cloneSmartConfig(s config.SmartConfig) config.SmartConfig {
+	res := s
+	if s.Tiers != nil {
+		res.Tiers = make(map[string][]string, len(s.Tiers))
+		for k, v := range s.Tiers {
+			res.Tiers[k] = append([]string(nil), v...)
+		}
+	}
+	return res
 }
 
 func smartChainFromContext(ctx context.Context) ([]string, bool) {

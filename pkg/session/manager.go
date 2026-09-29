@@ -53,6 +53,10 @@ type RequestRecord struct {
 	TokensPerSecond      float64   `json:"tokens_per_second"`
 	Status               string    `json:"status"` // "success" or "error"
 	ErrorMessage         string    `json:"error_message,omitempty"`
+	Tier                 string    `json:"tier,omitempty"`                   // smart routing tier (simple, medium, complex, reasoning)
+	SmartReason          string    `json:"smart_reason,omitempty"`           // classifier reason / confidence
+	SmartDurationMs      int64     `json:"smart_duration_ms,omitempty"`      // classification decision duration
+	RequestedModel       string    `json:"requested_model,omitempty"`        // original model requested (e.g. "smart")
 }
 
 // ModelUsage tracks aggregate usage for a specific model within a session.
@@ -79,6 +83,8 @@ type Session struct {
 	CreatedAt              time.Time              `json:"created_at"`
 	LastActive             time.Time              `json:"last_active"`
 	LastModel              string                 `json:"last_model,omitempty"`
+	LastTier               string                 `json:"last_tier,omitempty"`
+	LastSmartReason        string                 `json:"last_smart_reason,omitempty"`
 	RequestCount           int                    `json:"request_count"`
 	ContextTokens          int                    `json:"context_tokens"` // input tokens in the most recent request
 	ContextTokensEstimated bool                   `json:"context_tokens_estimated,omitempty"`
@@ -387,6 +393,10 @@ func (m *Manager) RecordRequest(sessionID string, rec RequestRecord) {
 	}
 
 	// Track model, update last model, and accumulate per-model usage stats
+	if rec.Tier != "" {
+		s.LastTier = rec.Tier
+		s.LastSmartReason = rec.SmartReason
+	}
 	if rec.Model != "" {
 		s.LastModel = rec.Model
 

@@ -32,6 +32,10 @@ type RequestTrace struct {
 
 	// Latency stages
 	ReadDuration     time.Duration // Time to read request body from client
+	SmartDuration    time.Duration // Time taken for smart tier classification
+	SmartTier        string        // simple, medium, complex, reasoning
+	SmartReason      string        // classifier reason/confidence
+	SmartSticky      bool          // reused sticky turn
 	TTFT             time.Duration // Time-to-first-token from request start
 	StreamDuration   time.Duration // Time streaming tokens (from first token to EOF)
 	UpstreamDuration time.Duration // Total upstream call duration (for non-streaming)
@@ -97,6 +101,29 @@ func (t *RequestTrace) SetReadDuration(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ReadDuration = d
+}
+
+// SetSmart records the smart model decision outcome, reason, sticky flag, and latency.
+func (t *RequestTrace) SetSmart(tier, reason string, sticky bool, d time.Duration) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.SmartTier = tier
+	t.SmartReason = reason
+	t.SmartSticky = sticky
+	t.SmartDuration = d
+}
+
+// SmartInfo returns the recorded smart routing details.
+func (t *RequestTrace) SmartInfo() (tier, reason string, sticky bool, d time.Duration) {
+	if t == nil {
+		return "", "", false, 0
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.SmartTier, t.SmartReason, t.SmartSticky, t.SmartDuration
 }
 
 // MarkFirstToken marks the arrival of the first token/chunk from the upstream provider.
@@ -270,8 +297,11 @@ func (t *RequestTrace) FormatRoute() string {
 
 	var parts []string
 	routeDesc := model
+	if t.SmartTier != "" && t.TargetModel != "" && t.RequestedModel != t.TargetModel {
+		routeDesc = fmt.Sprintf("%s[%s] -> %s", t.RequestedModel, t.SmartTier, t.TargetModel)
+	}
 	if t.Provider != "" && t.Provider != "unknown" {
-		routeDesc = fmt.Sprintf("%s via %s", model, t.Provider)
+		routeDesc = fmt.Sprintf("%s via %s", routeDesc, t.Provider)
 	}
 	if t.Destination != "" {
 		routeDesc = fmt.Sprintf("%s -> %s", routeDesc, t.Destination)
@@ -302,8 +332,20 @@ func (t *RequestTrace) FormatBreakdown() string {
 		stages = append(stages, fmt.Sprintf("read: %s", FormatDuration(t.ReadDuration)))
 	}
 
+	// Smart decision duration
+	if t.SmartTier != "" {
+		smartDesc := fmt.Sprintf("smart %s: %s", t.SmartTier, FormatDuration(t.SmartDuration))
+		if t.SmartSticky {
+			smartDesc += " (sticky)"
+		}
+		stages = append(stages, smartDesc)
+	}
+
 	// Notes (e.g. fallback attempts)
 	for _, n := range t.notes {
+		if t.SmartTier != "" && strings.HasPrefix(n, "smart ") {
+			continue
+		}
 		stages = append(stages, n)
 	}
 
