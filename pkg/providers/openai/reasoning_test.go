@@ -24,3 +24,14 @@ func TestReasoningAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestUsesMaxCompletionTokens(t *testing.T) {
+	for m, want := range map[string]bool{
+		"gpt-6": true, "gpt-6-mini": true, "gpt-5.1": true, "gpt-10": true, "o1": true, "o4-mini": true,
+		"gpt-5-codex": true, "gpt-4o": false, "gpt-4.1": false, "gpt-3.5-turbo": false, "gpt-oss-120b": false, "llama-3": false,
+	} {
+		if got := usesMaxCompletionTokens(m); got != want {
+			t.Errorf("%s: got %v want %v", m, got, want)
+		}
+	}
+}

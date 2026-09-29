@@ -60,6 +60,9 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 	requestCopy := *req
 	req = &requestCopy
 	req.Stream = false
+	if c.shouldUseResponses(req) {
+		return c.executeResponses(ctx, req)
+	}
 	openAIReq, err := ToOpenAIRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("transform to openai request: %w", err)
@@ -93,6 +96,9 @@ func (c *Client) Execute(ctx context.Context, req *canonical.CanonicalRequest) (
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if isResponsesRequired(resp.StatusCode, respBody) {
+			return c.executeResponses(ctx, req)
+		}
 		return nil, fmt.Errorf("openai api error status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -108,6 +114,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	requestCopy := *req
 	req = &requestCopy
 	req.Stream = true
+	if c.shouldUseResponses(req) {
+		return c.streamResponses(ctx, req)
+	}
 	openAIReq, err := ToOpenAIRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("transform to openai stream request: %w", err)
@@ -138,6 +147,9 @@ func (c *Client) Stream(ctx context.Context, req *canonical.CanonicalRequest) (<
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if isResponsesRequired(resp.StatusCode, body) {
+			return c.streamResponses(ctx, req)
+		}
 		return nil, fmt.Errorf("openai stream api error %d: %s", resp.StatusCode, string(body))
 	}
 

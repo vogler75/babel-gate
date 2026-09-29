@@ -24,11 +24,7 @@ func ToOpenAIRequest(req *canonical.CanonicalRequest) (*ChatCompletionRequest, e
 	}
 
 	modelLower := strings.ToLower(req.Model)
-	isNewerModel := strings.HasPrefix(modelLower, "gpt-5") ||
-		strings.HasPrefix(modelLower, "o1") ||
-		strings.HasPrefix(modelLower, "o3") ||
-		strings.HasPrefix(modelLower, "o4") ||
-		strings.Contains(modelLower, "codex")
+	isNewerModel := usesMaxCompletionTokens(modelLower)
 
 	if isNewerModel {
 		out.MaxCompletionTokens = req.Params.MaxTokens
@@ -512,4 +508,26 @@ func ToOpenAIResponse(resp *canonical.CanonicalResponse) (*ChatCompletionRespons
 	}
 
 	return out, nil
+}
+
+// usesMaxCompletionTokens reports whether the model rejects max_tokens in favor
+// of max_completion_tokens: gpt-5 and later (any major version >= 5), the
+// o-series reasoning models (o1, o3, o4, ...), and codex models.
+func usesMaxCompletionTokens(model string) bool {
+	if strings.Contains(model, "codex") {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(model, "gpt-"); ok {
+		n := 0
+		digits := 0
+		for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+			n = n*10 + int(rest[digits]-'0')
+			digits++
+		}
+		return digits > 0 && n >= 5
+	}
+	if len(model) >= 2 && model[0] == 'o' && model[1] >= '0' && model[1] <= '9' {
+		return true
+	}
+	return false
 }
